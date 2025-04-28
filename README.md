@@ -16,7 +16,7 @@ git clone https://github.com/orgs/ibdome/repositories/ibdome-paper.git
 ### Change directory and create a data folder
 
 ```
-export IBDOME_BASEDIR=$(realpath plattner_ibdome_2025)
+export IBDOME_BASEDIR=$(realpath ibdome-paper)
 
 cd $IBDOME_BASEDIR
 mkdir data
