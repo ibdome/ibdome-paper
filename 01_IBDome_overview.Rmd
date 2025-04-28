@@ -1,0 +1,733 @@
+---
+title: "Overview and characterization of the IBDome atlas"
+author: "chripla"
+date: "`r Sys.Date()`"
+params:
+  database: "data/ibdome_v1.0.1.sqlite"
+  artifact_dir: "results"
+---
+
+
+Load libraries:
+```{r}
+box::use(
+   lib/colors[COLORS],
+   lib/db[db_connect],
+   readr[write_tsv, write_csv, read_tsv, read_csv],
+   dplyr[...],
+   tibble[column_to_rownames, rownames_to_column],
+   tidyr[pivot_wider],
+   cowplot[theme_cowplot, background_grid],
+   ggbeeswarm[geom_quasirandom],
+   ggpubr[stat_cor],
+   ggplot2[...],
+   grid[gpar, grid.lines],
+   ComplexHeatmap[...],
+   patchwork[...],
+   trackViewer[lolliplot],
+   GenomicRanges[GRanges],
+   IRanges[IRanges],
+   GenomicFeatures[makeTxDbFromGFF],
+   ensembldb[transcripts, exonsBy],
+   DESeq2[DESeqDataSetFromMatrix, estimateSizeFactors, counts, collapseReplicates, DESeq, results, summary, lfcShrink],
+   IHW[ihw],
+   S4Vectors[...]
+)
+
+options(warn=-1)
+```
+
+
+Connect to the IBDome database:
+```{r}
+DB = db_connect(params$database)
+dir.create(params$artifact_dir, showWarnings = FALSE)
+``` 
+
+Define plotting function:
+```{r}
+make_scatter = function(df, disease_filter, color_by, x, y, wjitter=NULL, hjitter=NULL) {
+  p = df |> 
+    filter(disease == !!disease_filter) |>
+    ggplot(aes_string(x=x, y=y)) + geom_jitter(aes_string(color=color_by), width=wjitter, height=hjitter) + 
+    theme_cowplot() + background_grid() + stat_cor() + ggtitle(disease_filter) + 
+    geom_smooth(method="lm", fullrange=TRUE, se=FALSE, color="darkgray") + 
+    scale_color_manual(values=COLORS$tissue)
+  p
+}
+```
+
+## Data overview
+
+### Get scores from patients 
+
+Calculate mean score if there are multiple scores per patient and date!
+
+1.) Clinical scores:
+* HBI
+* PMS
+
+```{r}
+subject_timepoints = tbl(DB, "subject_timepoints2") |> inner_join(tbl(DB, "subjects"), by="subject_id") |> collect()
+
+clinical_scores = subject_timepoints |>
+  group_by(subject_id, disease, timepoint) |>
+  summarize(hbi_score_sum=mean(hbi_score_sum, na.rm=TRUE), pms_score_sum=mean(pms_score_sum, na.rm=TRUE)) |> 
+  mutate(timepoint = as.Date(timepoint)) |> 
+  ungroup()
+``` 
+
+2.) Endoscopic scores:
+* SES-CD
+* UCEIS
+
+```{r}
+endoscopy = tbl(DB, "samples") |> inner_join(tbl(DB, "data_endoscopy"), by = "sample_id") |> collect()
+
+endo_scores = endoscopy |>
+  group_by(subject_id, date) |> 
+  summarise_at(vars(SES_CD, UCEIS), \(x) mean(x, na.rm=TRUE)) |> 
+  mutate(date = as.Date(date))
+``` 
+
+3.) Histopathology scores:
+* modified Naini-Cortina score
+* modified Riley score
+
+```{r}
+histo = tbl(DB, "samples") |> inner_join(tbl(DB, "data_histopathology2"), by="sample_id") |> inner_join(tbl(DB, "tissues"), by="tissue") |> collect()
+
+histo_scores = histo |>
+  group_by(subject_id, date, tissue_coarse) |> 
+  summarise_at(vars(modified_naini_cortina_score, modified_riley_score, normalized_naini_cortina_score, normalized_riley_score), \(x) mean(x, na.rm=TRUE)) |>
+  mutate(date = as.Date(date))
+``` 
+
+4.) Bristol stool score:
+
+```{r}
+stool = tbl(DB, "samples") |> inner_join(tbl(DB, "data_stool"), by="sample_id") |> collect()
+
+stool_scores = stool |>
+  select(subject_id, date, stool_score) |>
+  mutate(date = as.Date(date))
+``` 
+
+### Overview of patients
+
+```{r}
+patient_overview = tbl(DB, "samples_subjects_tissues") |>
+  select(subject_id, disease, sex, sample_type, dataset) |>
+  filter(! is.na(disease) & disease != "Indeterminate colitis") |>
+  filter(sample_type != "16S") |>
+  collect() |>
+  distinct()
+
+patient_overview_wide = patient_overview |>
+  mutate(value = "yes") |>
+  pivot_wider(names_from=subject_id, id_cols=sample_type, values_from=value, values_fill=list(value="no")) |>
+  column_to_rownames("sample_type")
+``` 
+
+Show in heatmap:
+```{r, fig.width=20, fig.height=5}
+# annotation
+anno_data = patient_overview |>
+  select(- sample_type) |>
+  unique() |>
+  mutate(`study center` = ifelse(dataset=="ibdome_berlin", "Berlin", "Erlangen"),
+         group = case_when(disease == "Crohn's disease" & `study center` == "Berlin" ~ "CD Berlin",
+                           disease == "Crohn's disease" & `study center` == "Erlangen" ~ "CD Erlangen",
+                           disease == "Ulcerative colitis" & `study center` == "Berlin" ~ "UC Berlin",
+                           disease == "Ulcerative colitis" & `study center` == "Erlangen" ~ "UC Erlangen",
+                           disease == "non-IBD" & `study center` == "Berlin" ~ "non-IBD Berlin",
+                           disease == "non-IBD" & `study center` == "Erlangen" ~ "\u25b2"))
+
+# prepare matrix
+hm_matrix <- as.matrix(ifelse(patient_overview_wide == "yes", 1, 0))
+
+# Order according to column sums and histopathology ( =most frequent sample type)
+col_sums <- colSums(hm_matrix, na.rm=TRUE)
+row_index <- which(rownames(hm_matrix) == "histopathology")
+col_order <- order(col_sums, 
+                   # If column sums are equal, sort by "histopathology" (1s first)
+                   -hm_matrix[row_index, ], decreasing = TRUE)
+hm_matrix <- hm_matrix[, col_order, drop=FALSE]
+
+# Ensure correct order:
+anno_data <- anno_data[match(colnames(hm_matrix), anno_data$subject_id), , drop=FALSE]
+
+# Define group order for plotting
+anno_data$group <- factor(anno_data$group, levels = c("CD Berlin", "CD Erlangen", "UC Berlin", "UC Erlangen", "non-IBD Berlin", "\u25b2"))
+
+column_annotations <- HeatmapAnnotation(
+  disease = anno_data$disease, 
+  sex = anno_data$sex,
+  `study center` = anno_data$`study center`,
+  col=list(
+    disease=COLORS$disease,
+    sex=COLORS$sex,
+    `study center`=COLORS$`study center`
+  ),
+  annotation_legend_param = list(
+     title_gp = gpar(fontsize = 16), # Title text size
+     labels_gp = gpar(fontsize = 14) # Labels text size for annotation legends
+     ),
+  annotation_name_gp = gpar(fontsize=14)
+)
+
+row_order = c("histopathology", "H&E staining", "Olink", "RNA-seq", "WES", "endoscopy", "stool")
+hm_matrix <- hm_matrix[row_order, , drop=FALSE]
+
+white.line <- function(j, i, x, y, w, h, fill) { grid.lines(x = c(x - w/2, x + w / 2), y = c(y + h / 2, y + h / 2), gp = gpar(col = 'white', lwd = 2)) }
+
+hm_patients = Heatmap(
+  hm_matrix,
+  name="samples available",
+  col = c("grey95", "grey23"),
+  cell_fun = white.line,
+  show_column_names = FALSE,
+  column_split = anno_data$group,
+  cluster_columns = FALSE,
+  cluster_rows = FALSE,
+  top_annotation = column_annotations,
+  heatmap_legend_param = list(title_gp = gpar(fontsize = 16),
+                              labels_gp = gpar(fontsize = 14)),
+  row_names_gp = gpar(fontsize=16),
+  column_title_gp = gpar(fontsize=16)
+)
+
+## add legend for non-IBD Erlangen manually:
+lgd_sig = Legend(pch = "\u25b2", type = "points", labels = "non-IBD Erlangen", labels_gp=gpar(fontsize=16))
+
+draw(hm_patients,
+     annotation_legend_list = list(lgd_sig),
+     heatmap_legend_side = "bottom",
+     annotation_legend_side = "bottom",
+     merge_legend=TRUE)
+
+pdf(file=file.path(params$artifact_dir, "ExtendedDataFigure1a.pdf"), width=20, height=4)
+draw(hm_patients,
+     annotation_legend_list = list(lgd_sig),
+     heatmap_legend_side = "bottom",
+     annotation_legend_side = "bottom",
+     merge_legend=TRUE)
+dev.off()
+``` 
+
+
+### Number of patients per sample type
+```{r, fig.width=6, fig.height=5}
+samples_by_type = tbl(DB, "samples_subjects_tissues") |>
+  select(subject_id, disease, sample_type) |> distinct() |> group_by(sample_type, disease) |> count() |> collect() |>
+  filter(sample_type != "16S") ## exclude for now as we only have 27 at the moment
+
+subject_counts = tbl(DB, "subjects") |> group_by(disease) |> count() |> collect() |> mutate(sample_type = "total patients")
+
+clinical_score_counts = clinical_scores |> filter(!is.na(hbi_score_sum) | !is.na(pms_score_sum)) |> select(subject_id, disease) |> distinct() |> group_by(disease) |> count() |> mutate(sample_type="clinical activity score")
+
+all_sample_counts = bind_rows(samples_by_type, subject_counts, clinical_score_counts)
+
+## ensure correct ordering (descending by sample type):
+agg_counts <- all_sample_counts |>
+  group_by(sample_type) |>
+  summarise(total_n=sum(n)) |>
+  arrange(desc(total_n))
+
+all_sample_counts$sample_type <- factor(all_sample_counts$sample_type, levels=agg_counts$sample_type)
+
+all_sample_counts |>
+  ggplot(aes(x=sample_type, y=n, fill=disease)) + 
+  geom_bar(stat='identity') + 
+  theme_cowplot() + 
+  xlab("")+
+  scale_fill_manual(values=COLORS$disease, na.translate=FALSE) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  geom_text(
+    aes(label=after_stat(y), group=sample_type),
+    stat= 'summary', fun=sum, vjust=-0.1)
+
+ggsave(file.path(params$artifact_dir, "Figure1b.pdf"), width = 6, height = 5)
+```
+
+### Number of total samples
+```{r, fig.width=6, fig.height=5}
+number_samples_total = tbl(DB, "samples_subjects_tissues") |>
+   select(subject_id, disease, sample_type) |> group_by(sample_type, disease) |> count() |> collect() |>
+   filter(sample_type != "16S") ## exclude for now as we only have 27 at the moment
+
+## ensure correct ordering (descending by sample type):
+agg_samples <- number_samples_total |>
+  group_by(sample_type) |>
+  summarise(total_n=sum(n)) |>
+  arrange(desc(total_n))
+
+number_samples_total$sample_type <- factor(number_samples_total$sample_type, levels=agg_samples$sample_type)
+
+number_samples_total |>
+  ggplot(aes(x=sample_type, y=n, fill=disease)) + 
+  geom_bar(stat='identity') + 
+  theme_cowplot() + 
+  xlab("")+
+  scale_fill_manual(values=COLORS$disease, na.translate=FALSE) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+    geom_text(
+    aes(label=after_stat(y), group=sample_type),
+    stat= 'summary', fun=sum, vjust=-0.1)
+
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1b.pdf"), width = 6, height = 5)
+``` 
+
+### Correlation between histopathology and stool score
+```{r, fig.width=10, fig.height=4.5}
+stool_vs_histo = histo_scores |> inner_join(stool_scores) |> inner_join(subject_timepoints |> select(subject_id, disease), by="subject_id") |>
+  group_by(subject_id, date, tissue_coarse, disease) |> summarise_all(\(x) median(x, na.rm = TRUE)) |> ungroup()
+
+p1 <- make_scatter(stool_vs_histo, "Ulcerative colitis", "tissue_coarse", x="normalized_riley_score", y="stool_score", wjitter=0.02, hjitter=0.05) +
+  theme(legend.position="none") # hide first legend
+p2 <- make_scatter(stool_vs_histo, "Crohn's disease", "tissue_coarse", x="normalized_naini_cortina_score", y="stool_score", wjitter=0.02, hjitter=0.05) +
+  ylab("")
+
+p1+p2
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1c.pdf"), width = 10, height = 4.5)
+``` 
+
+### Correlation between histopathology and clinical scores
+```{r, fig.width=11, fig.height=4.5}
+clinical_vs_histo = clinical_scores |> 
+  inner_join(histo_scores, by="subject_id") |>
+  mutate(time_difference = abs(date - timepoint)) |> 
+  # remove useless entries (no matching scores)
+  filter( !(is.na(hbi_score_sum) | is.na(modified_naini_cortina_score)) | !(is.na(pms_score_sum) & is.na(modified_riley_score))) |>
+  group_by(subject_id, tissue_coarse, date) |> 
+  filter(time_difference == min(time_difference)) |> 
+  select(subject_id, disease, tissue_coarse, date, timepoint, hbi_score_sum, modified_naini_cortina_score,
+         pms_score_sum, modified_riley_score, time_difference, normalized_naini_cortina_score, normalized_riley_score) |>
+  mutate(time_difference = as.numeric(time_difference)) 
+
+clinical_vs_histo  = clinical_vs_histo |> filter(time_difference < 180)
+
+p1 <- make_scatter(clinical_vs_histo, "Ulcerative colitis", "tissue_coarse", x="pms_score_sum", y="normalized_riley_score", wjitter=0.2, hjitter=0.05) +
+  theme(legend.position="none") # hide first legend
+p2 <- make_scatter(clinical_vs_histo, "Crohn's disease", "tissue_coarse", x="hbi_score_sum", y="normalized_naini_cortina_score", wjitter=0.2, hjitter=0.05)
+
+p1+ plot_spacer() + p2 + plot_layout(widths = c(1,0.1,1))
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1d.pdf"), width = 10, height = 4.5)
+``` 
+
+### Correlation between endoscopy and histopathology scores
+```{r, fig.width=11, fig.height=4.5}
+endo_vs_histo = histo_scores |> inner_join(endo_scores) |> inner_join(subject_timepoints |> select(subject_id, disease), by="subject_id") |> 
+  group_by(subject_id, date, tissue_coarse, disease) |> summarise_all(\(x) median(x, na.rm = TRUE)) |> ungroup()
+
+p1 <- make_scatter(endo_vs_histo, "Ulcerative colitis", "tissue_coarse", x="UCEIS", y="normalized_riley_score", wjitter=0.02, hjitter=0.05) +
+  theme(legend.position="none") # hide first legend
+p2 <- make_scatter(endo_vs_histo, "Crohn's disease", "tissue_coarse", x="SES_CD", y="normalized_naini_cortina_score",  wjitter=0.02, hjitter=0.05)
+
+p1+ plot_spacer() + p2 + plot_layout(widths = c(1,0.1,1))
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1e.pdf"), width = 10, height = 4.5)
+```
+
+
+## NOD2 mutation
+
+Get coding variants from external file:
+*(Note that we only store the SNPs of interest within the IBDome database)*
+```{r}
+coding_vars_NOD2 = read_tsv("tables/NOD2_coding_vars.tsv")
+
+# Remove "NGS01" from sample names if present:
+coding_vars_NOD2$sampleName = gsub("NGS01", "", coding_vars_NOD2$sampleName)
+``` 
+
+Merge with metadata:
+```{r}
+metadata = tbl(DB, "samples_subjects_tissues") |>
+  filter(sample_type == "WES") |>
+  select(orig_id, subject_id, disease) |>
+  collect() |>
+  dplyr::rename("sampleName" = "orig_id")
+
+coding_vars_NOD2 = coding_vars_NOD2 |>
+  left_join(metadata, by="sampleName")
+``` 
+
+As we do have multiple samples for some patients, we combine those:
+```{r}
+coding_vars_NOD2_filtered <- coding_vars_NOD2 |>
+  select(subject_id, disease, variation, Location, Feature, Consequence) |>
+  filter(disease != "Indeterminate colitis") |>
+  na.omit() |>
+  unique()
+
+dim(table(coding_vars_NOD2_filtered$subject_id))
+``` 
+
+```{r}
+coding_vars_NOD2_filtered <- coding_vars_NOD2_filtered |>
+  mutate(
+    chromosome = gsub(":.+", "", Location),  # Extract chromosome part
+    position_numeric = as.numeric(gsub("-.+", "", gsub(".+:", "", Location)))  # Extract only the first position for ranges
+  )
+
+## show different transcripts:
+table(coding_vars_NOD2_filtered$Feature)
+
+# select only protein coding for plot 
+## see also: https://www.ensembl.org/Homo_sapiens/Gene/Summary?db=core;g=ENSG00000167207;r=16:50693588-50733077;t=ENST00000647318
+NOD2_tx_ids_version = c("ENST00000300589.6", "ENST00000531674.1", "ENST00000534057.1")
+``` 
+
+Get exon-intron information from gtf-file:
+```{r}
+gtf_url <- "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_33/gencode.v33.primary_assembly.annotation.gtf.gz"
+gtf_file <- "gencode.v33.primary_assembly.annotation.gtf.gz"
+
+# Check if file exists locally, if not — download it
+if (!file.exists(gtf_file)) {
+  download.file(gtf_url, destfile = gtf_file)
+  message("Downloaded GTF file.")
+} else {
+  message("GTF file already exists locally.")
+}
+
+txdb_ensembl = makeTxDbFromGFF(file=gtf_file, format="gtf")
+tx_names <- transcripts(txdb_ensembl)$tx_name
+
+matching_tx_names <- tx_names[tx_names %in% NOD2_tx_ids_version]
+
+# Get exons and introns for NOD2 using the created Ensembl TxDb
+exons_by_transcript <- exonsBy(txdb_ensembl, "tx")
+transcripts_info <- transcripts(txdb_ensembl)
+
+# Set names for the exons_by_transcript based on transcript IDs
+names(exons_by_transcript) <- transcripts_info$tx_name
+
+exons_NOD2 <- exons_by_transcript[names(exons_by_transcript) %in% NOD2_tx_ids_version]
+```
+
+Prepare the mutation data:
+```{r}
+coding_vars_NOD2_filtered = coding_vars_NOD2_filtered |>
+  dplyr::filter(Feature %in% c("ENST00000300589", "ENST00000534057", "ENST00000531674")) # select only protein coding transcript mutations
+  
+# Calculate the total count per variant
+total_per_variant <- coding_vars_NOD2_filtered |>
+  group_by(variation) |>
+  summarise(total_variant_count = n())
+
+# Calculate mutations per variant per disease category and the percentage for each
+mutation_counts <- coding_vars_NOD2_filtered |>
+  group_by(variation, disease) |>
+  summarise(count = n(), .groups = 'drop') |>
+  left_join(total_per_variant, by = "variation") |>
+  mutate(
+    percentage_per_disease = (count / total_variant_count) * 100 
+  )
+
+mutation_counts_long <- mutation_counts |>
+  pivot_wider(names_from=disease, id_cols=variation, values_from=percentage_per_disease, values_fill = 0)
+
+# Get unique coding vars:
+coding_vars_NOD2_unique = coding_vars_NOD2_filtered |>
+  dplyr::select(chromosome, position_numeric, variation) |>
+  unique() |>
+  left_join(mutation_counts_long)
+
+# Create a GRanges object for each mutation
+### make sure, that value1-3 are the only columns except of "color", "fill", "alpha", "shape", "lwd", "id" and "id.col", that are numeric. Pie will consider all numeric columns!
+mutation_gr <- GRanges(
+  seqnames = coding_vars_NOD2_unique$chromosome,  
+  ranges = IRanges(start = coding_vars_NOD2_unique$position_numeric, width = 1, 
+  names = coding_vars_NOD2_unique$variation),
+  strand = "+",
+  value1 = coding_vars_NOD2_unique$`Crohn's disease`,
+  value2 = coding_vars_NOD2_unique$`Ulcerative colitis`,
+  value3 = coding_vars_NOD2_unique$`non-IBD`
+)
+
+# Assign colors based on the mutation
+## most frequent mutations: rs2066844 (=R702W), rs2066845 (=G908R) and rs2066847 (frameshift; 1007fs)
+### see also: https://link.springer.com/article/10.1007/s40291-023-00678-7
+mutation_gr$label.parameter.col <- ifelse(names(mutation_gr) %in% c("rs2066844", "rs2066845", "rs2066847"), "red", "black")  # Highlighted in red, others in black
+mutation_gr$color <- rep(list(c("#1b9e77", "#d95f02", "#e7298a")), dim(coding_vars_NOD2_unique)[1])
+```
+
+Prepare the gene model:
+```{r}
+features = exons_NOD2
+names(features) = gsub("\\.\\d+$", "", names(features))
+features = unlist(features)
+## define feature track layers
+features$featureLayerID <- as.numeric(factor(names(features)))
+features$height = 0.06
+
+unique_tx <- unique(names(features))
+tx_colors <- c("#efbf38", "#e08600", "#aa4c0a")
+names(tx_colors) <- unique_tx
+
+features$fill <- tx_colors[names(features)]
+``` 
+
+### Create lolliplot
+```{r, fig.width=15, fig.height=5}
+legends <- list(labels = c("Crohn's disease", "Ulcerative colitis", "non-IBD"),
+                fill = c("#1b9e77", "#d95f02", "#e7298a"))
+
+# Create lolliplot
+lolliplot(mutation_gr,  # GRanges object with mutations
+          features,
+          type = "pie",
+          legend = legends,
+          legendPosition="right",
+          ylab="NOD2",
+          rescale = TRUE)
+
+ggsave(file.path(params$artifact_dir, "Figure1d.pdf"), width = 15, height = 5)
+``` 
+
+## DE analysis comparing IBD inflamed vs non-IBD samples
+
+Retrieve counts and metadata from the database:
+```{r}
+rnaseq_metadata = tbl(DB, "samples_subjects_tissues_with_inflammation") |>
+  filter(sample_type == "RNA-seq") |>
+  filter(! is.na(disease)) |>
+  collect() |>
+  mutate(group = if_else(inflammation_status == "inflamed", "IBD_inflamed", "IBD_non_inflamed")) |>
+  mutate(group = if_else(disease=="non-IBD", "non-IBD",group)) |>
+  mutate(age = as.numeric(format(as.Date(date), "%Y"))- birth_year) |>
+  mutate(age_scaled = scale(age)[,1]) |>
+  filter(! is.na(group))
+
+# filter for IBD inflamed and non-IBD samples
+sampleAnno = rnaseq_metadata |>
+  filter(group %in% c("IBD_inflamed", "non-IBD")) |>
+  select(sample_id, batch, sex, tissue_coarse, age_scaled, group)
+
+# get raw counts for the selected samples  
+count_mat = tbl(DB, "data_rnaseq") |>
+  select(sample_id, gene_id, raw_counts) |>
+  filter(sample_id %in% sampleAnno$sample_id) |>
+  collect() |>
+  pivot_wider(id_cols=gene_id, names_from=sample_id, values_from=raw_counts) |>
+  column_to_rownames("gene_id") |>
+  round() # salmon does not necessarily contain integers
+
+table(colnames(count_mat) == sampleAnno$sample_id)
+``` 
+
+### Define design formula
+```{r}
+design_formula = as.formula("~group + batch + sex + age_scaled + tissue_coarse")
+contrast = c("group", "IBD_inflamed", "non-IBD")
+``` 
+
+### Run DEseq2
+
+```{r}
+dds <- DESeqDataSetFromMatrix(countData = count_mat,
+                              colData = sampleAnno,
+                              design = design_formula)
+
+## keep only genes where we have >= 10 reads per sample condition in total
+keep <- rowSums(counts(collapseReplicates(dds, dds[[contrast[1]]]))) >= 10
+dds <- dds[keep,]
+
+dds <- estimateSizeFactors(dds)
+
+# Set the reference to the baseline
+dds[["group"]] = relevel(dds[[contrast[1]]], contrast[3])
+
+# run DESeq
+dds <- DESeq(dds, parallel = TRUE)
+
+# get normalized counts
+nc <- counts(dds, normalized=T)
+
+ddsl <- list(contrast = dds)
+```
+
+### IHW
+
+```{r}
+# use of IHW for p value adjustment of DESeq2 results
+resIHW <- results(dds, filterFun=ihw, contrast=contrast)
+
+resIHW <- as.data.frame(resIHW ) |>
+  rownames_to_column(var = "gene_id") |>
+  as_tibble() |>
+  arrange(padj)
+
+resSHRINK  <- lfcShrink(dds, contrast= contrast, type ="normal")
+resSHRINK <- as.data.frame(resSHRINK) |>
+  rownames_to_column(var = "gene_id") |>
+  as_tibble() |>
+  arrange(padj) |>
+  dplyr::rename(lfcSE_shrink = lfcSE) |>
+  dplyr::rename(log2FoldChange_shrink = log2FoldChange)
+ 
+resIHW <- left_join(resIHW, select(resSHRINK, c(gene_id,log2FoldChange_shrink,lfcSE_shrink)), by="gene_id")
+resIHW  <- resIHW |>
+  left_join((tbl(DB, "genes") |> collect()), by=c("gene_id" = "ensg")) |>
+  dplyr::rename(genes_description = description) |>
+  arrange(pvalue)
+  
+summary(resIHW)
+``` 
+
+Write results to file for Extended Data Table 1:
+```{r}
+write_tsv(resIHW, file=file.path(params$artifact_dir, "ExtendedDataTable1.tsv"))
+``` 
+
+### Filter for significantly regulated genes
+
+* FDR < 0.05
+* |log2FC| > 1
+
+```{r}
+resIHWsig = resIHW |>
+  filter(padj < 0.05 & (log2FoldChange > 1 | log2FoldChange < -1))
+``` 
+
+### Plot heatmap of significantly regulated cytokines, chemokines, and chemokine receptors across all conditions
+
+Get list of immune related genes stored within the repo:
+```{r}
+immune_genes <- read_csv(file="tables/immune_genes.csv") |>
+  filter(group %in% c("cytokine", "chemokine", "chemokine.r")) |>
+  mutate(group = case_when(group == "chemokine.r" ~ "chemokine receptor",
+                   TRUE ~ group))
+```
+
+Filter for significantly regulated immune related genes:
+```{r}
+DE_immune <- resIHWsig |>
+  filter(hgnc_symbol %in% immune_genes$gene) |>
+  pull(hgnc_symbol) |>
+  unique()
+``` 
+
+Add endoscopic and histopathology scores to metadata:
+```{r}
+rnaseq_metadata = rnaseq_metadata |>
+  mutate(date = as.Date(date)) |>
+  left_join(endo_scores) |>
+  left_join(histo_scores)
+```
+
+
+Plot heatmap:
+```{r}
+tpm_IBDome_goi = tbl(DB, "data_rnaseq") |>
+  left_join(tbl(DB, "genes"), by=c("gene_id" = "ensg")) |>
+  filter(hgnc_symbol %in% DE_immune) |>
+  mutate(log_tpm = log10(tpm + 1)) |>
+  collect() |>
+  pivot_wider(id_cols = "hgnc_symbol", names_from="sample_id", values_from="log_tpm") |>
+  column_to_rownames("hgnc_symbol")
+
+# order according to annotation table:
+tpm_IBDome_goi = tpm_IBDome_goi[, rnaseq_metadata$sample_id]
+
+#scale
+tpm_IBDome_goi_scaled =t(scale(t(tpm_IBDome_goi[!apply(tpm_IBDome_goi, 1, function(row) {all(row == 0)}),])))
+
+# Heatmap annotations:
+ha = HeatmapAnnotation(
+    group = rnaseq_metadata$group,
+    disease = rnaseq_metadata$disease,
+    sex=rnaseq_metadata$sex,
+    tissue = rnaseq_metadata$tissue_coarse,
+    blank2 = anno_empty(border=FALSE, height=unit(3, "mm")),
+    SES_CD = rnaseq_metadata$SES_CD,
+    UCEIS = rnaseq_metadata$UCEIS,
+    blank4 = anno_empty(border=FALSE, height=unit(3, "mm")),
+    normalized_naini_cortina=rnaseq_metadata$normalized_naini_cortina_score,
+    normalized_riley=rnaseq_metadata$normalized_riley_score,
+    col=list(
+      group=COLORS$group,
+      disease=COLORS$disease,
+      sex=COLORS$sex,
+      tissue = COLORS$tissue,
+      SES_CD=circlize::colorRamp2(seq(0, 60, 1), viridisLite::viridis(61)),
+      UCEIS=circlize::colorRamp2(seq(0, 8, 0.25), viridisLite::inferno(33)),
+      normalized_naini_cortina=circlize::colorRamp2(seq(0, 1, 0.01), viridisLite::viridis(101)),
+      normalized_riley=circlize::colorRamp2(seq(0, 1, 0.01), viridisLite::inferno(101))
+    ),
+   annotation_legend_param = list(
+     title_gp = gpar(fontsize = 14, fontface = "bold"), # Title text size
+     labels_gp = gpar(fontsize = 12), # Labels text size for annotation legends
+     legend_height = unit(2.5, "cm"), # Increase height of annotation legend
+     legend_width = unit(2.5, "cm")   # Increase width of annotation legend
+     )
+)
+
+### immune gene annotation
+immune_IBDome <- immune_genes |>
+  filter(gene %in% DE_immune)
+
+# correct order of genes
+immune_IBDome <- immune_IBDome[match(rownames(tpm_IBDome_goi_scaled), immune_IBDome$gene), ]
+
+la = rowAnnotation(immune_group = immune_IBDome$group, 
+                   show_annotation_name = FALSE,
+                   col=list(
+                     immune_group = c("chemokine" = "#F0E442",
+                        "chemokine receptor" = "#56B4E9",
+                        "cytokine" = "#D55E00")
+                   ),
+                  annotation_legend_param = list(
+                    title_gp = gpar(fontsize = 14, fontface = "bold"), # Title text size
+                    labels_gp = gpar(fontsize = 12), # Labels text size for annotation legends
+                    legend_height = unit(5, "cm"), # Increase height of annotation legend
+                    legend_width = unit(5, "cm")   # Increase width of annotation legend
+     )
+)
+```
+
+```{r, fig.height=12, fig.width=20}
+# Define order for plotting
+rnaseq_metadata$group <- factor(rnaseq_metadata$group, levels = c('IBD_inflamed', 'IBD_non_inflamed', 'non-IBD'))
+
+hm_IBDome <- Heatmap(tpm_IBDome_goi_scaled,
+                     column_split = rnaseq_metadata$group,
+                     column_title=c("IBD inflamed", "IBD non-inflamed", "non-IBD"),
+                     column_title_gp = gpar(fontsize=16),
+                     top_annotation = ha,
+                     left_annotation = la,
+                     show_row_names = TRUE,
+                     show_row_dend = FALSE,
+                     show_column_names = FALSE,
+                     show_column_dend = FALSE,
+                     cluster_column_slices = FALSE,
+                     row_split = immune_IBDome$group,
+                     name="z-score",
+                     row_names_gp = gpar(fontface = "italic"),
+                     heatmap_legend_param = list(legend_height = unit(2.5, "cm"), # Increase the height
+                                                 legend_width = unit(2.5, "cm"),  # Increase the width
+                                                 title_gp = gpar(fontsize = 14, fontface = "bold"), # Title text size
+                                                 labels_gp = gpar(fontsize = 12) # Labels text size
+                     ))
+
+
+draw(hm_IBDome,
+     heatmap_legend_side = "bottom",
+     annotation_legend_side = "bottom",
+     merge_legend=TRUE)
+
+pdf(file=file.path(params$artifact_dir, "Figure1e.pdf"), width=20, height=12)
+draw(hm_IBDome,
+     heatmap_legend_side = "bottom",
+     annotation_legend_side = "bottom",
+     merge_legend=TRUE)
+dev.off()
+```
+
+
+### Session info
+
+```{r}
+sessionInfo()
+``` 

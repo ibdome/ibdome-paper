@@ -1,0 +1,901 @@
+---
+title: "Inflammatory Protein Severity Signature (IPSS)"
+author: "chripla"
+date: "`r Sys.Date()`"
+output: html_document
+params:
+  database: "data/ibdome_v1.0.1.sqlite"
+  artifact_dir: "results"
+---
+
+Load libraries:
+```{r}
+box::use(
+   lib/colors[COLORS],
+   lib/db[db_connect],
+   dplyr[...],
+   tidyr[pivot_wider, drop_na],
+   tibble[column_to_rownames, rownames_to_column],
+   ggplot2[...],
+   ggfortify[...],
+   grid[gpar, grid.text],
+   cowplot[theme_cowplot],
+   patchwork[wrap_plots, plot_layout],
+   OlinkAnalyze[olink_ttest],
+   EnhancedVolcano[EnhancedVolcano],
+   ggVennDiagram[ggVennDiagram],
+   org.Hs.eg.db[org.Hs.eg.db],
+   AnnotationDbi[select],
+   UpSetR[upset],
+   GSVA[gsva, gsvaParam],
+   ggbeeswarm[geom_quasirandom],
+   ggpubr[stat_compare_means],
+   reshape2[melt],
+   Hmisc[rcorr],
+   ComplexHeatmap[Heatmap],
+   readr[write_tsv]
+)
+
+options(warn=-1)
+set.seed(123)
+```
+
+Connect to the IBDome database:
+```{r}
+DB = db_connect(params$database)
+dir.create(params$artifact_dir, showWarnings = FALSE)
+``` 
+
+### Get Olink metadata from database
+
+```{r}
+meta_data_olink = tbl(DB, "samples_subjects_tissues_with_inflammation") |>
+  filter(sample_type == "Olink") |>
+  filter(! is.na(disease)) |>
+  dplyr::select(sample_id, subject_id, date, tissue, sample_type, dataset, disease, sex, localization_cd, localization_uc, inflammation_status) |>
+  collect() |>
+  mutate(group = if_else((disease %in% c("Crohn's disease", "Ulcerative colitis", "Indeterminate colitis") & inflammation_status == "inflamed"),
+                         "IBD_inflamed", "IBD_non_inflamed")) |>
+  mutate(group = if_else(disease=="non-IBD", "non-IBD", group)) |>
+  mutate(disease_short = case_when(disease== "Crohn's disease" ~ "CD",
+                                   disease== "Ulcerative colitis" ~ "UC",
+                                   disease== "Indeterminate colitis" ~ "IC",
+                                   disease== "non-IBD" ~ "nonIBD")) |>
+  mutate(group_disease = paste0(disease_short, "_", inflammation_status)) |>
+  mutate(group_disease = if_else(disease=="non-IBD", "non-IBD", group_disease))
+```
+
+### Get Olink protein NPX data
+
+NPX = normalized protein expression (Olink's arbitrary unit)
+
+```{r}
+olink_data = tbl(DB, "data_olink") |>
+  filter(sample_id %in% meta_data_olink$sample_id) |>
+  collect() 
+
+# convert to matrix:
+olink_matrix = olink_data |>
+  dplyr::select(-OlinkID,-UniProt) |>
+  pivot_wider(names_from = Assay,values_from = NPX)
+```
+
+## Principal component analysis of the protein data
+
+```{r, fig.height=15, fig.width=7}
+data_pca = olink_matrix  |>
+  column_to_rownames(var = "sample_id") |>
+  dplyr::select(where(~ !any(is.na(.))))
+
+# correct order:
+data_pca = data_pca[meta_data_olink$sample_id, ]
+table(rownames(data_pca) == meta_data_olink$sample_id)
+
+# run PCA:
+pca_res = prcomp(data_pca, scale.=TRUE)
+
+covariates = c("disease", "sex", "inflammation_status")
+
+# create plots:
+pca_plots = lapply(covariates, function(color_var) {
+  autoplot(pca_res, data = meta_data_olink, colour = color_var) +
+    geom_point(aes(colour = !!sym(color_var)), size = 3) +  # Map color and set point size
+    theme_cowplot() +
+    theme(
+      legend.position = "right",               
+      axis.title = element_text(size = 14),     # Increase axis title size
+      axis.text = element_text(size = 12),      # Increase axis text size
+      legend.text = element_text(size = 12),    # Increase legend text size
+      legend.title = element_text(size = 14)    # Increase legend title size
+    ) +
+    scale_color_manual(values = COLORS[[color_var]]) 
+})
+
+# Arrange plots in a column:
+wrap_plots(pca_plots, ncol=1)
+
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure2b.pdf"), width = 7, height =15)
+```
+
+## Differential abundance analysis with OlinkAnalyze
+
+Prepare input data frame:
+long format with metadata
+```{r}
+npx_data = olink_data |>
+  left_join(meta_data_olink |> dplyr::select(sample_id, group, disease, group_disease, inflammation_status)) |>
+  rename("SampleID" = "sample_id") |>
+  mutate(Panel = "Olink Inflammation")
+
+## filter for Assays, that have at least 90% non missing values:
+complete_cases <- olink_matrix |>
+  dplyr::select(where(~sum(!is.na(.)) > nrow(olink_matrix)*0.1))|>
+  column_to_rownames("sample_id") |>
+  names()
+``` 
+
+### IBD inflamed vs. non-inflamed
+
+Subset data frame:
+```{r}
+npx_data_IBDinf_noninf = npx_data |>
+  filter(group %in% c("IBD_inflamed", "IBD_non_inflamed")) |>
+  filter(Assay %in% complete_cases)
+
+npx_data_IBDinf_noninf$group = as.factor(npx_data_IBDinf_noninf$group)
+``` 
+
+Welch t-test
+```{r}
+t_res_IBDinf_noninf = olink_ttest(npx_data_IBDinf_noninf, variable="group")
+``` 
+
+Get significant proteins
+```{r}
+t_res_sig_IBDinf_noninf = t_res_IBDinf_noninf |>
+  filter(Adjusted_pval < 0.05)
+``` 
+
+Get signature proteins (upregulated in IBD inflamed vs. non-inflamed):
+```{r}
+olink_IBD_IPSS = t_res_sig_IBDinf_noninf |>
+  filter(estimate > 0) |>
+  pull(Assay)
+``` 
+
+Plot results:
+```{r, fig.height=5, fig.width=8}
+v1 <- EnhancedVolcano(t_res_IBDinf_noninf,
+    lab = t_res_IBDinf_noninf$Assay,
+    x = 'estimate',
+    y = 'Adjusted_pval',
+    title = 'IBD inflamed vs. non-inflamed',
+    subtitle="",
+    pCutoff = 0.05,
+    FCcutoff = 0,
+    xlim = c(-0.5, 1.1),
+    ylim = c(0, 10),
+    xlab = bquote(~log[2] ~ "fold change"),
+    ylab = bquote(~-log[10] ~ italic((FDR))),
+    legendPosition = 'right')  +
+  theme(legend.position = "none") 
+``` 
+
+
+### CD inflamed vs. non-inflamed
+
+Subset data frame:
+```{r}
+npx_data_CD = npx_data |>
+  filter(group_disease %in% c("CD_inflamed", "CD_non_inflamed")) |>
+  filter(Assay %in% complete_cases)
+
+npx_data_CD$group_disease = as.factor(npx_data_CD$group_disease)
+``` 
+
+Welch t-test
+```{r}
+t_res = olink_ttest(npx_data_CD, variable="group_disease")
+``` 
+
+Get signature proteins (upregulated in CD inflamed vs. non-inflamed):
+```{r}
+olink_CD_IPSS = t_res |>
+  filter(Adjusted_pval < 0.05) |>
+  filter(estimate > 0) |>
+  pull(Assay)
+``` 
+
+Plot results:
+```{r, fig.height=5, fig.width=8}
+v3 <- EnhancedVolcano(t_res,
+    lab = t_res$Assay,
+    x = 'estimate',
+    y = 'Adjusted_pval',
+    title = 'CD inflamed vs. non-inflamed',
+    subtitle="",
+    pCutoff = 0.05,
+    FCcutoff = 0,
+    xlim = c(-0.5,1),
+    ylim = c(0, 5),
+    xlab = bquote(~log[2] ~ "fold change"),
+    ylab = bquote(~-log[10] ~ italic((FDR))),
+    legendPosition = 'right')
+``` 
+
+### UC inflamed vs. non-inflamed
+
+Subset data frame:
+```{r}
+npx_data_UC = npx_data |>
+  filter(group_disease %in% c("UC_inflamed", "UC_non_inflamed")) |>
+  filter(Assay %in% complete_cases)
+
+npx_data_UC$group_disease = as.factor(npx_data_UC$group_disease)
+``` 
+
+Welch t-test
+```{r}
+t_res = olink_ttest(npx_data_UC, variable="group_disease")
+``` 
+
+Get signature proteins (upregulated in UC inflamed vs. non-inflamed):
+```{r}
+olink_UC_IPSS = t_res |>
+  filter(Adjusted_pval < 0.05) |>
+  filter(estimate > 0) |>
+  pull(Assay)
+``` 
+
+Plot results:
+```{r, fig.height=5, fig.width=8}
+v2 <- EnhancedVolcano(t_res,
+    lab = t_res$Assay,
+    x = 'estimate',
+    y = 'Adjusted_pval',
+    title = 'UC inflamed vs. non-inflamed',
+    subtitle = "",
+    pCutoff = 0.05,
+    FCcutoff = 0,
+    xlim = c(-1, 1.5),
+    ylim = c(0, 5),
+    xlab = bquote(~log[2] ~ "fold change"),
+    ylab = bquote(~-log[10] ~ italic((FDR))),
+    legendPosition = 'right')  +
+  theme(legend.position = "none") 
+``` 
+
+Put plots together:
+```{r, fig.height=5, fig.width=16}
+# Arrange plots in a column:
+(v1 | v2 | v3)
+
+ggsave(file.path(params$artifact_dir, "Figure2a.pdf"), width = 16, height = 5)
+``` 
+
+
+## Compare IBD inflamed with IBD non-inflamed and non-IBD
+
+### IBD inflamed vs. non-IBD
+
+Subset data frame:
+```{r}
+npx_data_IBDinf_nonIBD = npx_data |>
+  filter(group %in% c("IBD_inflamed", "non-IBD")) |>
+  filter(Assay %in% complete_cases)
+
+npx_data_IBDinf_nonIBD$group = as.factor(npx_data_IBDinf_nonIBD$group)
+``` 
+
+Welch t-test
+```{r}
+t_res_IBDinf_nonIBD = olink_ttest(npx_data_IBDinf_nonIBD, variable="group")
+``` 
+
+Get significant proteins
+```{r}
+t_res_sig_IBDinf_nonIBD = t_res_IBDinf_nonIBD |>
+  filter(Adjusted_pval < 0.05)
+``` 
+
+### IBD non-inflamed vs. non-IBD
+
+Subset data frame:
+```{r}
+npx_data_IBDnoninf_nonIBD = npx_data |>
+  filter(group %in% c("IBD_non_inflamed", "non-IBD")) |>
+  filter(Assay %in% complete_cases)
+
+npx_data_IBDnoninf_nonIBD$group = as.factor(npx_data_IBDnoninf_nonIBD$group)
+``` 
+
+Welch t-test
+```{r}
+t_res_IBDnoninf_nonIBD = olink_ttest(npx_data_IBDnoninf_nonIBD, variable="group")
+``` 
+
+Get significant proteins
+```{r}
+t_res_sig_IBDnoninf_nonIBD = t_res_IBDnoninf_nonIBD |>
+  filter(Adjusted_pval < 0.05)
+``` 
+
+### Plot heatmap of significantly abundant proteins in the different comparisons 
+
+Prepare data frame for heatmap:
+```{r}
+df_hm = t_res_IBDinf_nonIBD |>
+  dplyr::select(Assay, `IBDinf vs nonIBD` = estimate, inf_vs_nonIBD_padj = Adjusted_pval) |>
+  left_join(t_res_IBDinf_noninf |> dplyr::select(Assay, `IBDinf vs IBDnoninf` = estimate, inf_vs_noninf_padj = Adjusted_pval), by="Assay") |>
+  left_join(t_res_IBDnoninf_nonIBD |> dplyr::select(Assay, `IBDnoninf vs nonIBD` = estimate, noninf_vs_nonIBD_padj = Adjusted_pval), by="Assay")
+
+# filter for those proteins, which are at least in one condition significantly up- or downregulated
+df_hm_filtered = df_hm |> 
+  filter(rowSums(across(c(inf_vs_nonIBD_padj, inf_vs_noninf_padj, noninf_vs_nonIBD_padj), ~ .x < 0.05)) > 0)
+
+# Store expression and p-values separately:
+df_exp = df_hm_filtered |>
+  dplyr::select(Assay, `IBDinf vs nonIBD`, `IBDinf vs IBDnoninf`, `IBDnoninf vs nonIBD`) |>
+  column_to_rownames("Assay") 
+
+df_sig = df_hm_filtered |>
+  dplyr::select(inf_vs_nonIBD_padj, inf_vs_noninf_padj, noninf_vs_nonIBD_padj) 
+```
+
+Plot heatmap:
+```{r, fig.width=7, fig.height=23}
+Heatmap(df_exp, cluster_rows = FALSE, cluster_columns = FALSE,
+    width = unit(ncol(df_exp) * 10, "mm"),  # Adjust width for square cells
+    height = unit(nrow(df_exp) * 10, "mm"),  # Adjust height for square cells
+    name="estimate",
+    rect_gp = gpar(col = "white", lwd = 2),  # Add space between cells 
+    heatmap_legend_param = list(  # customize legend
+      legend_height = unit(6, "cm"),
+      grid_width= unit(0.6, "cm"),
+      title_position = "leftcenter-rot",
+      title_gp = gpar(fontsize=16),
+      labels_gp = gpar(fontsize=16)
+    ),  
+    cell_fun = function(j, i, x, y, w, h, fill) {
+      # Check for significance and add stars
+      if (!is.na(df_sig[i, j])) {
+        if(df_sig[i, j] < 0.01) {
+            grid.text("***", x, y)
+        } else if(df_sig[i, j] < 0.05) {
+            grid.text("**", x, y)
+        } else if(df_sig[i, j] < 0.1) {
+            grid.text("*", x, y)
+        }
+      }
+    },
+    ,
+  column_names_rot = 45,
+  row_names_gp = gpar(fontsize = 16),  # Increase row label font size
+  column_names_gp = gpar(fontsize = 16)  # Increase column label font size
+)
+
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure2e.pdf"), width = 7, height = 23)
+```
+
+
+## Define the IBD inflammation protein severity score (IBD-IPSS)
+
+```{r}
+IPSS = list("IBD-IPSS" = olink_IBD_IPSS,
+            "CD-IPSS" = olink_CD_IPSS,
+            "UC-IPSS" = olink_UC_IPSS)
+``` 
+
+Save as supplementary table 1:
+```{r}
+write.table(sort(olink_IBD_IPSS, decreasing=FALSE), file=file.path(params$artifact_dir, "ExtendedDataTable2_IBD_IPSS.tsv"), sep="\t", row.names = FALSE, col.names = FALSE, quote=FALSE)
+write.table(sort(olink_CD_IPSS, decreasing=FALSE), file=file.path(params$artifact_dir, "ExtendedDataTable2_CD_IPSS.tsv"), sep="\t", row.names = FALSE, col.names = FALSE, quote=FALSE)
+write.table(sort(olink_UC_IPSS, decreasing=FALSE), file=file.path(params$artifact_dir, "ExtendedDataTable2_UC_IPSS.tsv"), sep="\t", row.names = FALSE, col.names = FALSE, quote=FALSE)
+``` 
+
+### Check overlap of the different scores
+```{r, fig.height=6, fig.width=7}
+ggVennDiagram(IPSS[c("IBD-IPSS", "CD-IPSS", "UC-IPSS")], set_size=7, label_size=6)+
+  scale_fill_gradient(low="white", high="forestgreen") +
+  theme(legend.title = element_text(size=16), legend.text= element_text(size=14)) +
+  scale_x_continuous(expand = expansion(mult = .1))
+
+ggsave(file.path(params$artifact_dir, "Figure2b.pdf"), width = 7, height = 6)
+``` 
+
+### Check overlap with the cirMIS scores
+
+* cirMIS signature genes retrieved from Supplementary Table 4 from Argmann et al. Gut 2023 (https://doi.org/10.1136/gutjnl-2021-326451)
+
+```{r}
+cirMIS_IBD <- c("ADM", "INSC", "AC073172.2", "AC073172.1", "MMP8", "AC004917.1", "MGAM2", "MOXD2P", "TAS2R39", 
+                "AOC1", "CAPN13", "GALNT14", "AC009305.1", "DYSF", "SDR42E1P5", "SLC9A4", "TNFAIP6", "KCNH7",
+                "SOCS3", "AC061992.1", "KREMEN1", "AL021393.1", "OSM", "ALPL", "AC244453.3", "AC244453.2", 
+                "FCGR1B", "AC239798.2", "FCGR1A", "AC243772.2", "S100A12", "S100A8", "F5", "CACNA1E", 
+                "AL137789.1", "TLR5", "DSC2", "OLFM4", "CNGB1", "HP", "SLC26A8", "NR2E1", "ADGB", "ANOS1", 
+                "BMX", "ACE2", "AL008707.1", "FGF13", "PROK2", "CLRN1-AS1", "AC020636.2", "AC020636.1", 
+                "CLRN1", "ZDHHC19", "AL354877.1", "CLEC4D", "GPR84", "RPH3A", "TDRD9", "RD3L", "IGHA2", "CST7",
+                "MMP9", "AC087672.2", "SPATC1", "SMPD5", "OPLAH", "UCHL1", "ANXA3", "RF00019", "NDST3", 
+                "ACSL1", "LINC01093", "PFKFB3", "SDCBPP1", "OLAH", "DUSP13", "LIPM", "ANKRD22", "MCEMP1", 
+                "AC005392.2", "CD177", "FCAR",  "AC245128.3", "AC092336.1", "BASP1-AS1", "DCAF13P2", "GCSHP1", 
+                "NAIP", "BTNL3")
+
+cirMIS_UC <- c("ADM", "INSC", "AC073172.2", "AC073172.1", "AC004917.1", "MGAM2", "MOXD2P", "TAS2R39", "AOC1",
+               "CAPN13", "GALNT14", "AC009305.1", "DYSF", "SDR42E1P5", "SLC9A4", "SOCS3", "KREMEN1",
+               "AL021393.1", "OSM", "ALPL", "AC244453.3", "AC244453.2", "FCGR1B", "AC239798.2", "FCGR1A",
+               "AC243772.2", "S100A12", "F5","CACNA1E", "TLR5", "OLFM4", "CNGB1", "HP", "SLC26A8", "NR2E1",
+               "ADGB", "ANOS1", "BMX", "ACE2", "AL008707.1","FGF13", "PROK2", "CLRN1-AS1", "AC020636.2", 
+               "AC020636.1", "CLRN1", "ZDHHC19", "CLEC4D", "GPR84", "RPH3A", "TDRD9", "RD3L", "IGHA2", "CST7",
+               "MMP9", "AC087672.2", "SPATC1", "SMPD5", "OPLAH", "UCHL1", "ANXA3", "RF00019", "NDST3", "ACSL1",
+               "LINC01093", "PFKFB3", "SDCBPP1", "OLAH", "DUSP13", "LIPM", "ANKRD22", "MCEMP1", "AC005392.2", 
+               "CD177", "FCAR", "AC245128.3", "AC092336.1", "BASP1-AS1", "DCAF13P2", "GCSHP1", "NAIP", "BTNL3")
+
+cirMIS_CD <- c("ADM", "INSC", "AC073172.2", "AC073172.1", "MMP8", "AC004917.1", "MGAM2", "MOXD2P", "TAS2R39",
+               "TAS2R40", "AOC1", "CAPN13", "GALNT14", "AC009305.1", "DYSF", "SDR42E1P5", "SLC9A4", "TNFAIP6", 
+               "KCNH7", "SOCS3", "AC061992.1", "KREMEN1", "AL021393.1", "OSM", "ALPL", "AC244453.3", 
+               "AC244453.2", "FCGR1B", "AC239798.2", "FCGR1A", "AC243772.2", "S100A12", "S100A8", "F5", 
+               "CACNA1E", "AL137789.1", "TLR5", "DSC2", "OLFM4", "CNGB1", "HP", "SLC26A8", "NR2E1", "ADGB", 
+               "ANOS1", "BMX", "ACE2", "AL008707.1", "FGF13", "PROK2", "CLRN1-AS1", "AC020636.2", "AC020636.1", 
+               "CLRN1", "ZDHHC19", "AL354877.1", "CLEC4D", "GPR84", "RPH3A", "TDRD9", "RD3L", "RN7SL634P", 
+               "IGHA2", "AC066616.1", "CST7", "MMP9", "AC087672.2", "SPATC1", "SMPD5", "OPLAH", "ANXA3", 
+               "RF00019", "NDST3", "ACSL1", "LINC01093", "PFKFB3", "SDCBPP1", "OLAH", "DUSP13", "LIPM", 
+               "ANKRD22", "MCEMP1", "FFAR3", "AC005392.2", "CD177", "PGLYRP1", "FCAR", "AC245128.3", 
+               "AC092336.1", "BASP1-AS1", "DCAF13P2", "GCSHP1", "AC146944.2", "NAIP", "BTNL3")
+``` 
+
+
+Map Olink proteins to gene symbols:
+
+```{r}
+gene_symbols <- AnnotationDbi::select(org.Hs.eg.db, keys=unique(olink_data$UniProt), keytype="UNIPROT", columns=c("SYMBOL"))
+
+gene_conversion = gene_symbols |>
+  left_join(olink_data |> dplyr::select(UniProt, Assay), by=c("UNIPROT" = "UniProt")) |>
+  unique()
+```
+
+### Visualize intersections of the different scores
+
+Visualize in UpSet plot:
+```{r, fig.height=5, fig.width=5}
+# Create a list of sets
+set_list <- list(
+  `cirMIS IBD` = cirMIS_IBD,
+  `cirMIS CD` = cirMIS_CD,
+  `cirMIS UC` = cirMIS_UC,
+  `IBD-IPSS` = gene_conversion |> filter(Assay %in% olink_IBD_IPSS) |> pull(SYMBOL),
+  `CD-IPSS` = gene_conversion |> filter(Assay %in% olink_CD_IPSS) |> pull(SYMBOL),
+  `UC-IPSS` = gene_conversion |> filter(Assay %in% olink_UC_IPSS) |> pull(SYMBOL)
+)
+
+# Convert to binary presence/absence matrix for UpSetR
+binary_matrix <- UpSetR::fromList(set_list)
+
+# Generate UpSet plot
+upset(
+  binary_matrix,
+  sets = c("cirMIS IBD", "IBD-IPSS", "cirMIS CD", "CD-IPSS", "cirMIS UC", "UC-IPSS"),
+  order.by = "freq",
+  keep.order = TRUE,
+   text.scale = c(2, 2, 1.5, 1.5, 1.5, 2)  # Adjust text sizes (scaling factors)
+)
+
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure2c.pdf"), width = 5, height = 5)
+```
+
+
+## Calculate IPSS-scores with GSVA
+
+### Run GSVA
+
+Prepare input data frame:
+```{r}
+olink_GSVA <- olink_data |>
+  filter(sample_id %in% meta_data_olink$sample_id) |>
+  pivot_wider(id_cols = "sample_id", names_from="Assay", values_from="NPX")  |>
+  column_to_rownames("sample_id") |> as.matrix() |> t()
+``` 
+
+Build GSVA parameter object:
+```{r}
+gsvapar <- gsvaParam(expr=olink_GSVA, IPSS, maxDiff = TRUE)
+gsva_results_prot <- gsva(gsvapar)
+``` 
+
+Convert GSVA results to long format:
+```{r}
+gsva_long_prot <- gsva_results_prot |>
+  t() |>
+  data.frame() |>
+  rownames_to_column("sample_id") |>
+  left_join(meta_data_olink) |>
+  mutate(date=as.Date(date))
+```
+
+Write to Extended Data Table 3:
+```{r}
+write_tsv(gsva_long_prot |> dplyr::select(sample_id, subject_id, date, IBD.IPSS, CD.IPSS, UC.IPSS), file=file.path(params$artifact_dir, "ExtendedDataTable3_IPSSscores.tsv"))
+``` 
+
+## Correlation with other parameters
+
+### Calculate bMIS scores from RNA-seq data
+
+* bMIS signature genes retrieved from Supplementary Table 4 from Argmann et al. Gut 2023 (https://doi.org/10.1136/gutjnl-2021-326451)
+
+```{r}
+bMIS_IBD = c("GRIN2D", "MDFI", "MUC5AC", "GSDMC", "SIX1", "SAA2", "KRT16", "CD274", "SLC7A5", "LY6D", "PGC", 
+             "KRT17", "SAA1", "VSIG1", "SERPINB5", "RND1", "SMIM25", "AC034199.1", "HABP2", "PIM2", "IL6", 
+             "CCL11", "STC1", "SERPINB4", "CSNK1A1L", "FAP", "GABRP", "IGLV1-51", "IGLV9-49", "OSM", "TFAP2C",
+             "IGLV1-44", "IGLV1-40","SERPINB3", "PDE10A", "LINC00473", "MRPS31P2", "AC017002.1", "LINC01303", 
+             "IGKV1-5", "IGKV1-9", "IGKV3-11", "IGKV3-15", "IGKV3-20", "TFPI2", "DCSTAMP", "CASP1P2", "CEACAM4", 
+             "LINC02577", "CLDN2", "LCN2", "IGKV1-39", "SERPINB7", "LBP", "DSG3", "IGLV3-21", "IGKV2D-40",
+             "IGHV4OR15-8", "SLC11A1", "RNF183", "PADI4", "MYEOV", "HAS1", "C6orf223", "AQP9", "C4orf50", 
+             "SOCS1", "ALDH1A2", "IL1A", "AP005233.2", "IL1B", "CMTM2", "NPSR1", "CDH3", "FPR1", "RPL7P31", 
+             "NCAPD2P1", "FOXQ1", "NPSR1-AS1", "FPR2", "ABCA12", "TIMP1", "SPATA20P1", "FIBIN", "KCNJ15", 
+             "EGFL6", "LGALS12", "AC113615.1", "CHRDL2", "IL1RN", "LINC00114", "IL13RA2", "KYNU", "IL11", 
+             "SPINK4", "LINC01484", "LPL", "JSRP1", "VNN3", "CT83", "MCEMP1", "ADGRG3", "SLC4A11", "IGFBP5", 
+             "DMBT1", "AL583785.1", "OLFM4", "UCN2", "C2CD4A", "FOLH1", "FAM157B", "C2CD4B", "AC023796.2", 
+             "ZBP1", "LGALS9DP", "THBS2", "LINC01913", "CYP24A1", "MSX2", "AC115522.1", "LYPD5", "NOS2", 
+             "KRT6B", "CCR8", "NLRP12", "HNRNPA1P21", "LINC01679", "MEFV", "CD300E", "KRT6A", "FJX1", 
+             "LINC00839", "TRIM29", "DCC", "PLAU", "GIP", "SLCO1B3", "TNFRSF9", "RNF182", "KLK7", "KLK6", 
+             "BCL2A1", "LIPN", "LILRA6", "MNDA", "SOCS3", "AC061992.1", "IGHV6-1", "CCR3", "CXCR2", "IGHV1-2", 
+             "IGHV1-3", "TREML4", "FAM83A", "TREM1", "IGHV3-15", "IGHV1-18", "LINC01709", "CXCR1", "KLK10", 
+             "IGHV3-20", "IGHV3-21", "IGHV1-24", "IGHV2-26", "LINC01819", "IGHV4-31", "LUCAT1", "IGHV4-34", 
+             "IGHV4-39", "IGHV1-46", "WISP1", "LILRB2", "CPXM1", "FFAR3", "DUSP4", "CSF2", "UBD", "OR2I1P", 
+             "ADAMTS4", "TNFAIP6", "CXCL8", "CXCL6", "CXCL1", "INHBA", "CXCL5", "CXCL3", "FFAR2", "FAM92B", 
+             "PTGS2", "IGHV3-53", "IGHV1-58", "IGHV4-61", "STRA6", "DUOXA1", "CXCL2", "FCGR3A", "FCGR3B", 
+             "DUOX2", "DUOXA2", "FCN1", "IGHV1-69", "IGHV2-70D", "LILRA5", "ACOD1", "ENKUR", "IGHV3-73", 
+             "NNMT", "MEDAG", "CTLA4", "CEMIP", "GNA15", "AQP5", "GCKR", "IL17A", "PLA1A", "CFB", "C2",
+             "CSF3R", "AC007991.4", "AC007991.2", "IDO1", "SELP", "SELE", "FOSB", "NMUR2", "TCN1", "CLDN14",
+             "CLEC5A", "PI3", "SEMG1", "CLDN1", "GZMB", "MMP7", "CHI3L1", "HCAR3", "HCAR2", "AL354702.1", 
+             "FCN3", "REG1B", "PDX1", "REG1A", "DEFB4A", "CFI", "PROK2", "GATA4", "AC239798.2", "MUC16", 
+             "NFE2", "KCND3", "LINC01750", "TNFRSF8", "LAIR2", "FCAR", "C4BPB", "C4BPA", "CD55", "LILRA2", 
+             "CXCL9", "GLT1D1", "CLDN18", "WNT2", "AC245128.3", "LILRA1", "SERPINA3", "SERPINE1", "IFNG", 
+             "IL22", "GPR84", "TNIP3", "CSF3", "ANXA10", "GBP1", "GBP4", "PLA2G3", "EPHB1", "MMP3", "MMP1", 
+             "MMP10", "CXCL10", "ART3", "GBP5", "FCGR1A", "CXCL11", "GBP1P1", "FAM157A", "PDZK1IP1", "STRIP2",
+             "PDPN", "APOL1", "GALNTL6", "ALPL", "HAPLN3", "IGHG4", "IGHG2", "IGHGP", "TDO2", "IGHG1", "IGHG3",
+             "REG4", "S100A9", "S100A12", "S100A8", "S100A3", "AC244453.2", "FCGR1B", "TNFRSF10C", "KRT80", 
+             "MIR3945HG", "CLEC6A", "CLEC4D", "CLEC4E", "KRT7", "L1TD1", "PQLC2L", "MLC1", "RF00019", "MIR5571")
+
+bMIS_CD = c("GRIN2D", "CALHM6", "MDFI", "MUC5AC", "GSDMC", "SIX1", "SAA2", "KRT16", "LY6D", "PGC", "KRT17", 
+            "SAA1", "VSIG1", "SMIM25", "CCL2", "CCL7", "IL6", "CCL11", "STC1", "SERPINB4", "CSNK1A1L", "FAP", 
+            "OSM", "TFAP2C", "LINC00473", "IGKV3-15", "IGKV3-20", "TFPI2", "DCSTAMP", "CEACAM4", "LINC02577", 
+            "LCN2", "SERPINB7", "LBP", "IGHV4OR15-8", "SLC11A1", "MYEOV", "IGKV2D-29", "C6orf223", "AQP9", 
+            "C4orf50", "ALDH1A2", "IL1A", "IGKV3D-15", "AP005233.2", "IL1B", "CMTM2", "NPSR1", "CDH3", "FPR1",
+            "FOXQ1", "AC005515.1", "FPR2", "ABCA12", "SPATA20P1", "FIBIN", "KCNJ15", "EGFL6", "CHRDL2", "IL1RN",
+            "IL13RA2", "KYNU", "IL11", "SPINK4", "LINC01484", "LPL", "JSRP1", "VNN3","MCEMP1","ADGRG3","DMBT1", 
+            "AL583785.1", "OLFM4", "UCN2", "C2CD4A", "FOLH1", "FAM157B", "LGALS9DP", "LINC01913", "AC115522.1",
+            "LYPD5", "NOS2", "KRT6B", "NLRP12", "MEFV", "CD300E", "KRT6A", "FJX1", "DCC", "GIP", "SLCO1B3", 
+            "HPN", "RNF182", "LIPN", "LILRA6", "MNDA", "SOCS3", "IGHV6-1", "CXCR2P1", "CXCR2", "IGHV1-3", 
+            "TREML4", "IGHV3-7", "FAM83A",  "TREM1", "IGHV3-15", "IGHV1-18", "CXCR1", "IGHV3-21", "IGHV1-24", 
+            "IGHV2-26", "LINC01819", "LUCAT1", "IGHV4-34", "IGHV1-46", "WISP1", "CPXM1", "CSF2", "UBD", "OR2I1P",
+            "ADAMTS4", "TNFAIP6", "CXCL8", "CXCL6", "CXCL1", "INHBA", "CXCL5","CXCL3","FFAR2","FAM92B","PTGS2",
+            "DUOXA1", "CXCL2", "FCGR3A", "FCGR3B", "DUOX2", "DUOXA2", "FCN1", "IGHV2-70D", "LILRA5", "ACOD1", 
+            "IGHV3-73", "CTLA4", "AQP5", "IL17A", "PLA1A", "CSF3R", "AC007991.4", "AC007991.2", "IDO1", "SELP", 
+            "SELE", "NMUR2", "TCN1", "CLDN14", "CLEC5A", "PI3", "SEMG1", "CLDN1", "GZMB", "MMP7", "CHI3L1", 
+            "HCAR3", "HCAR2", "AL354702.1", "FCN3", "REG1B", "PDX1", "REG1A", "DEFB4A", "CFI", "PROK2", 
+            "AC239798.2", "MUC16", "NFE2", "FCAR", "C4BPB", "C4BPA", "LILRA2","CXCL9","GLT1D1","CLDN18","WNT2", 
+            "AC245128.3", "SERPINA3", "SERPINE1", "FOLH1B", "IFNG", "IL22", "GPR84", "HSD11B1", "TNIP3", "CSF3",
+            "ANXA10", "GBP1", "GBP4", "EPHB1", "MMP3", "MMP1", "MMP10", "CXCL10", "ART3", "GBP5", "FCGR1A", 
+            "AC243772.2", "CXCL11", "GBP1P1", "PDPN", "APOL1", "GALNTL6", "HAPLN3", "IGHG4", "IGHG2", "IGHGP",
+            "TDO2", "IGHG1", "IGHG3", "S100A9", "S100A12", "S100A8", "AC244453.2", "FCGR1B", "TNFRSF10C", 
+            "MIR3945HG", "CLEC6A", "CLEC4D", "CLEC4E", "KRT7", "MIR5571")
+
+bMIS_UC = c("GRIN2D", "EBF3", "MDFI", "MUC5AC", "GSDMC", "SIX1", "SAA2", "ICAM1", "ANK1", "KRT16", "CD274", 
+            "SLC7A5", "LY6D", "CA9", "KRT17", "SAA1", "MEOX1", "GAL", "VSIG1", "CTHRC1", "SERPINB5", "ATP5MC1P6",
+            "RND1", "SMIM25", "LINC01270", "IL2RA", "AC034199.1", "NPTX2", "HABP2", "IGLV6-57", "PIM2", "IL6", 
+            "CASP5", "CCL11", "STC1", "SERPINB4", "CSNK1A1L", "FAP", "GABRP", "NOTUM", "IGLV1-51", "IGLV9-49", 
+            "AC099509.1", "TPTE2", "IGLV1-47", "ALDOB", "OSM", "TFAP2C", "IGLV1-44", "IGLV1-40", "IGLV1-36", 
+            "SERPINB3", "PDE10A", "LINC00473", "MRPS31P2", "AC017002.3", "RPS14P4", "AC017002.1", "LINC01303", 
+            "IGKV1-5", "IGKV1-9", "IGKV3-11", "IGKV1-12", "IGKV3-15", "IGKV3-20", "IGLV3-27", "TFPI2", "GRHL1", 
+            "DCSTAMP", "CASP1P2", "IGLV3-25", "CEACAM4", "LINC02577", "ROPN1L", "CLDN2", "LCN2", "IGKV1-39", 
+            "SERPINB7", "LBP", "PLEKHS1", "DSG3", "IGLV3-21", "IGKV2D-40", "IGHV4OR15-8", "IGLV3-19", "SLC11A1", 
+            "RNF183", "PADI4", "IGLV3-9", "MYEOV", "IFITM9P", "KCNQ3", "IGLV2-5", "SERPINB2", "IGLV3-1", "IGLC2",
+            "HAS1", "C6orf223", "AQP9", "C4orf50", "SOCS1", "ALDH1A2", "IL1A", "AP005233.2", "FER1L4", "IL1B", 
+            "CMTM2", "NPSR1", "CDH3", "AL365226.2", "FPR1", "RPL7P31", "NCAPD2P1", "FOXQ1", "NPSR1-AS1", "FPR2",
+            "ABCA12", "TIMP1", "IGF2BP3", "FOSL1", "SPATA20P1", "FIBIN", "KCNJ15", "EGFL6", "UNC5CL", "LGALS12",
+            "RBMXL2", "Z97206.2", "Z97206.1", "ARNTL2", "AC113615.1", "AC099524.1", "S1PR5", "HRH4", 
+            "AL592164.1", "CHRDL2", "IL1RN", "LINC00114", "BGN", "TM4SF20", "IL13RA2", "IGHV1OR15-2", 
+            "LINC02115", "KYNU", "AC004585.1", "IL11", "SPINK4", "VNN1", "CCNG1P1", "LINC01484", "MZB1", "ESM1",
+            "TRIB2", "LPL", "JSRP1", "SYT12", "VNN3", "CT83", "MCEMP1", "APOBEC1", "S100P", "ADGRG3", "CCNO", 
+            "SLC4A11", "IGFBP5","DMBT1", "AL583785.1", "OLFM4", "AC112721.2", "XKR9", "UCN2", "C2CD4A","ENPP7", 
+            "FOLH1", "FAM157B", "C2CD4B", "AC023796.2", "ZBP1", "LGALS9DP", "THBS2",  "OR52K3P", "MLN", 
+            "CYP24A1","VNN2", "IFNE", "MIR31HG", "MSX2", "CCL24", "AC115522.1","LYPD5","CHAC1","NOS2","KRT6B",
+            "LINC00346", "CCR8","NLRP12", "HNRNPA1P21", "LINC01679", "MEFV", "CD300E", "SIK1","KRT6A", "FJX1", 
+            "COL7A1", "TGM2", "PCDH17", "AL606807.1", "INHBB", "H19", "IL21R", "TFF1", "HRH2", "AFF2", 
+            "LINC00839", "ADM", "TRIM29","DCC", "CPS1", "SMOX", "PLAU", "SPHK1", "GIP", "SLCO1B3", "SLC6A20",
+            "TNFRSF9", "LPCAT1", "KLK7", "KLK6","BCL2A1", "PLA2G4E", "FCRL5", "CD1B", "SPNS2", "LIPN", "LILRA6",
+            "ADGRE2", "ADGRE3", "MNDA", "SIRPB1", "LINC01993", "VWFP1", "SOCS3", "AC061992.1", "IGHV6-1", "CCR3", 
+            "PLEKHN1", "RFX8", "CXCR2", "IGHV1-2", "IGHV1-3", "TREML2", "TREML4", "FAM83A", "TREM1", "IGHV3-11", 
+            "IGHV1-12", "IGHV3-15", "IGHV1-18", "RPSAP19", "LINC01709", "DNAJA1P5", "OLFM3", "CXCR1", "KLK10",
+            "IGHV3-20", "IGHV3-21", "IGHV3-23", "IGHV1-24", "IGHV2-26", "IGHV4-28", "LINC01819", "IGHV4-31", 
+            "RGS16", "LUCAT1", "IGHV3-33","IGHV4-34", "IGHV4-39", "IGHV3-43", "IGHV1-45", "IGHV1-46", "KLK11", 
+            "WISP1", "ITLN2", "LILRB2", "CPXM1", "MAP3K20-AS1", "IGHV3-49", "FFAR3", "DUSP4", "CSF2", "UBD", 
+            "OR2I1P", "ADAMTS4", "TNFAIP6","DEFA6", "CXCL8", "CXCL6", "CXCL1", "KLK12", "DEFA5", "MMP9", "INHBA",
+            "CXCL5", "CXCL3", "FFAR2", "FAM92B", "PTGS2", "IGHV5-51", "IGHV3-53", "IGHV1-58", "IGHV4-61", 
+            "IGHV4-59", "STRA6", "DUOXA1", "CXCL2", "FCGR3A", "FCGR3B", "DUOX2", "ABCA13", "DUOXA2", "CARD6", 
+            "FCN1", "IGHV3-66", "IGHV1-69", "IGHV2-70D", "LILRA5", "OLFML2B","ACOD1","ENKUR","TNC","IGHV3-73",
+            "SLC7A11", "NNMT", "AC015969.1", "MEDAG", "CTLA4", "CEMIP", "GNA15", "APLN", "AQP5", "PLA2G2A", 
+            "GCKR", "EVA1A", "IL17A", "PLA1A", "CFB", "C2", "CSF3R", "AC007991.4", "AC007991.2", "IDO1", "DKK2",
+            "SELP", "SELE", "FOSB", "ZC3H12A", "NMUR2", "TCN1", "CLDN14","AL049836.1","CLEC5A","PI3","ADGRF1",
+            "SEMG1", "CLDN1", "GZMB", "MMP7", "CD70", "COL23A1", "MYBPH", "CHI3L1", "HCAR3", "HCAR2", 
+            "AL354702.1", "LAX1", "PPP4R4", "FCN3", "REG1B","PDX1", "REG1A", "AGT", "DEFB4A", "CFI", "REG3A", 
+            "ABCG8", "ABCG5", "ACKR4", "PRSS1", "PRSS3P1", "PROK2", "GATA4", "PRSS22", "FGR", "MUC16", "NFE2", 
+            "KCND3-IT1", "KCND3-AS1", "KCND3", "LINC01750", "TNFRSF8", "LAIR2", "FCAR", "C4BPB", "C4BPA", "CD55",
+            "CXCL9", "GLT1D1", "CLDN18", "WNT2","AC245128.3", "LILRA1", "SERPINA3", "GPR4", "SERPINE1", "CHST2",
+            "ALDH3B2", "TACSTD2", "SPP1", "IFNG", "IL26", "IL22","AC084871.2", "OLIG1", "GPR84", "TNIP3", "CSF3", 
+            "ANXA10", "GBP1", "GBP4", "PLA2G3", "EPHB1", "MMP3", "MMP1", "MMP10", "CXCL10", "ART3", "GBP5", 
+            "FCGR1A", "CXCL11", "SFRP2", "AC105046.1", "EGR3", "LINC02323", "COL8A1","ADGRG6","FAM157A","EPHX4",
+            "PDZK1IP1", "STRIP2", "AC021218.1", "HTR1D", "PDPN","APOL1", "AL355483.3", "LRP8", "AC097478.1", 
+            "GALNTL6", "WNT5A", "ALPL", "IL21", "IL21-AS1", "HAPLN3", "IGHG4", "IGHG2", "IGHGP", "TDO2", "IGHG1",
+            "IGHG3", "IGHD", "ANXA1", "REG4", "PGLYRP4", "S100A9", "S100A12", "S100A8", "S100A3", "S100A2", 
+            "AC244453.2", "FCGR1B", "TNFRSF10C", "KRT80", "MIR3945HG", "CLEC6A", "TESC", "CLEC4D", "CLEC4E",
+            "KRT7", "L1TD1", "PQLC2L", "MYH13", "HGF","MYRFL", "IL17REL", "MLC1", "RN7SL471P", "RF00019",
+            "MIR5571", "RN7SL368P")
+
+bMIS_sig = list(bMIS_IBD = bMIS_IBD, bMIS_CD = bMIS_CD, bMIS_UC = bMIS_UC) 
+```
+
+Get RNA-seq meta data: 
+```{r}
+rnaseq_meta_data = tbl(DB, "samples_subjects_tissues_with_inflammation") |>
+  filter(sample_type =="RNA-seq") |>
+  collect() |>
+  mutate(date = as.Date(date))
+``` 
+
+Get inflammation score from histopathology:
+```{r}
+histo = tbl(DB, "samples_subjects_tissues") |> inner_join(tbl(DB, "data_histopathology2"), by="sample_id") |> collect() |>
+  mutate(date=as.Date(date))
+
+modified_riley_score <- histo |>
+  group_by(subject_id, date, tissue_coarse) |>
+  summarize(normalized_riley_score = median(normalized_riley_score, na.rm=TRUE)) |>
+  collect()
+
+modified_naini_cortina_score <- histo |>
+  group_by(subject_id, date, tissue_coarse) |>
+  summarize(normalized_naini_cortina_score = median(normalized_naini_cortina_score, na.rm=TRUE)) |>
+  as_tibble()
+
+rnaseq_meta_data = rnaseq_meta_data |> left_join(modified_naini_cortina_score) |> left_join(modified_riley_score)
+``` 
+
+Add endoscopic scores:
+```{r}
+endoscopy = tbl(DB, "samples_subjects_tissues") |> inner_join(tbl(DB, "data_endoscopy"), by = "sample_id") |> collect()
+
+endo_scores = endoscopy |>
+  group_by(subject_id, date) |> 
+  summarise_at(vars(SES_CD, UCEIS), \(x) mean(x, na.rm=TRUE)) |> 
+  mutate(date = as.Date(date))
+
+rnaseq_meta_data = rnaseq_meta_data |> left_join(endo_scores, by=c("subject_id", "date")) 
+``` 
+
+Add clinical scores:
+```{r}
+clinical_scores = tbl(DB, "subject_timepoints2") |>
+  dplyr::select(timepoint_id, subject_id, timepoint, hbi_score_sum, pms_score_sum) |>
+  collect()
+
+clinical_hbi = clinical_scores |>
+  dplyr::select(subject_id, timepoint, hbi_score_sum) |>
+  drop_na() |>
+  group_by(subject_id, timepoint) |>
+  summarize(hbi_score_sum=mean(hbi_score_sum, na.rm=TRUE)) |>
+  ungroup()
+
+clinical_pms = clinical_scores |>
+  dplyr::select(subject_id, timepoint, pms_score_sum) |>
+  drop_na() |>
+  group_by(subject_id, timepoint) |>
+  summarize(pms_score_sum=mean(pms_score_sum, na.rm=TRUE)) |>
+  ungroup()
+
+rnaseq_clinical_hbi = rnaseq_meta_data |>
+  dplyr::select(sample_id, subject_id, date) |>
+  left_join(clinical_hbi) |> 
+  mutate(time_difference = abs(as.Date(date) - as.Date(timepoint))) |>
+  group_by(subject_id, date) |> 
+  filter(time_difference == min(time_difference)) |>
+  filter(time_difference < 365) |>
+  group_by(subject_id, date) |>
+  slice_min(time_difference, with_ties=FALSE) |>
+  dplyr::select(subject_id, date, hbi_score_sum) |>
+  distinct()
+
+rnaseq_clinical_pms = rnaseq_meta_data |>
+  dplyr::select(sample_id, subject_id, date) |>
+  left_join(clinical_pms) |>
+  mutate(time_difference = abs(as.Date(date) - as.Date(timepoint))) |>
+  group_by(subject_id, date) |>
+  filter(time_difference == min(time_difference)) |>
+  filter(time_difference < 365) |>
+  group_by(subject_id, date) |>
+  slice_min(time_difference, with_ties = FALSE) |>
+  dplyr::select(subject_id, date, pms_score_sum) |>
+  distinct()
+
+rnaseq_meta_data <- rnaseq_meta_data |> left_join(rnaseq_clinical_hbi, by=c("subject_id", "date")) |> left_join(rnaseq_clinical_pms, by=c("subject_id", "date"))
+``` 
+
+Define inflammation groups:
+```{r}
+rnaseq_meta_data = rnaseq_meta_data |>
+  mutate(group = if_else(inflammation_status == "inflamed", "IBD_inflamed", "IBD_non_inflamed")) |>
+  mutate(group = if_else(disease=="non-IBD", "non-IBD",group))
+``` 
+
+
+Load gene expression values (TPMs):
+```{r}
+rnaseq_data = tbl(DB, "data_rnaseq") |> 
+  inner_join(tbl(DB, "genes"), by=c("gene_id"="ensg")) |>
+  collect() |>
+  mutate(log_tpm = log10(tpm + 1))
+```
+
+Prepare TPM table:
+```{r}
+# drop duplicated gene names:
+dup_genes = rnaseq_data |>
+  summarise(n = n(), .by = c(sample_id, hgnc_symbol)) |>
+  filter(n > 1L) |>
+  pull(hgnc_symbol) |>
+  unique() 
+
+# check if these genes are present in the signatures:
+table(dup_genes %in% bMIS_sig$bMIS_IBD)
+
+rnaseq_GSVA <- rnaseq_data |>
+  filter(! hgnc_symbol %in% dup_genes) |>
+  pivot_wider(id_cols = "sample_id", names_from="hgnc_symbol", values_from="tpm")  |>
+  column_to_rownames("sample_id") |> as.matrix() |> t()
+``` 
+
+### Run GSVA
+```{r}
+# build GSVA parameter object
+gsvapar <- gsvaParam(expr=rnaseq_GSVA, bMIS_sig, maxDiff = TRUE)
+gsva_results <- gsva(gsvapar)
+``` 
+
+Convert GSVA results to long format for ggplot2:
+```{r}
+gsva_long <- gsva_results |>
+  t() |>
+  data.frame() |>
+  rownames_to_column("sample_id") |>
+  left_join(rnaseq_meta_data)
+```
+
+
+If both histo-scores are present (modified Naini Cortina and modified Riley scores), take the maximum:
+```{r}
+gsva_long = gsva_long |>
+  mutate(inflammation = pmax(normalized_naini_cortina_score, normalized_riley_score, na.rm = TRUE))
+``` 
+
+Write to Extended Data Table 4:
+```{r}
+write_tsv(gsva_long |> dplyr::select(sample_id, subject_id, date, tissue, sampling_procedure, bMIS_IBD, bMIS_CD, bMIS_UC), file=file.path(params$artifact_dir, "ExtendedDataTable4_bMISscores.tsv"))
+``` 
+
+### Plot bMIS-IBD scores with inflammation
+
+```{r, fig.width=6.5, fig.height=5}
+ggplot(gsva_long |> filter(! is.na(group)), aes(x=group, y=bMIS_IBD))+
+  geom_boxplot()+
+  geom_quasirandom(aes(color=inflammation), size=2) + 
+  scale_color_viridis_c()+
+  theme_cowplot() +
+  xlab("") +
+  stat_compare_means(method="wilcox.test", paired = FALSE, comparisons = list(c("IBD_inflamed", "IBD_non_inflamed"),c("non-IBD", "IBD_non_inflamed"),c("IBD_inflamed", "non-IBD")))
+
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure2a.pdf"), width = 6.5, height = 5)
+```
+
+Combine with protein data:
+```{r}
+data_corr = gsva_long |>
+  inner_join(gsva_long_prot |> dplyr::select(sample_id, CD.IPSS, UC.IPSS, subject_id, date), by=c('subject_id','date')) |>
+  filter(disease %in% c("Crohn's disease", "Ulcerative colitis")) |>
+  group_by(subject_id, date) |>
+  summarize(SES_CD = mean(SES_CD, na.rm = T), 
+            UCEIS = mean(UCEIS, na.rm = T),
+            normalized_naini_cortina_score = mean(normalized_naini_cortina_score, na.rm = T),  
+            normalized_riley_score=mean(normalized_riley_score, na.rm = T),
+            HBI=mean(hbi_score_sum,na.rm = T), 
+            PMS=mean(pms_score_sum,na.rm = T), 
+            bMIS_UC = mean(bMIS_UC,na.rm=T), 
+            bMIS_CD = mean(bMIS_CD,na.rm=T) , disease=disease, CD.IPSS=CD.IPSS, UC.IPSS = UC.IPSS) |>
+  ungroup()
+``` 
+
+
+### Compute Pearson correlation between the different scores for UC and CD
+
+Function to plot correlation matrix for a given dataset
+```{r}
+plot_corr_matrix <- function(cor_data, ordered_names) {
+  
+  # Compute correlation matrix and p-values
+  cor_results <- rcorr(as.matrix(cor_data))
+  cor_matrix <- cor_results$r    # Pearson correlation values
+  p_values <- cor_results$P      # P-values
+  
+  # Convert to Long Format
+  cor_melt <- melt(cor_matrix)
+  p_melt <- melt(p_values)
+  
+  # Rename columns
+  colnames(cor_melt) <- c("Var1", "Var2", "Correlation")
+  colnames(p_melt) <- c("Var1", "Var2", "p_value")
+  
+  # Merge correlation & p-values into one dataframe
+  cor_melt <- merge(cor_melt, p_melt, by = c("Var1", "Var2"))
+  
+  # Create Significance Stars
+  cor_melt$Significance <- ifelse(cor_melt$p_value < 0.001, "***",
+                                   ifelse(cor_melt$p_value < 0.01, "**",
+                                          ifelse(cor_melt$p_value < 0.05, "*", "")))
+  
+  # Define Factor Levels to Enforce Custom Order
+  cor_melt$Var1 <- factor(cor_melt$Var1, levels = ordered_names)
+  cor_melt$Var2 <- factor(cor_melt$Var2, levels = ordered_names)
+  
+  # Assign Values to Upper and Lower Triangle
+  cor_melt$Label <- ifelse(cor_melt$Var1 == cor_melt$Var2, "",  # Remove diagonal
+                           ifelse(as.numeric(cor_melt$Var1) < as.numeric(cor_melt$Var2),  # Lower triangle
+                                  cor_melt$Significance, 
+                                  round(cor_melt$Correlation, 2)))  # Upper triangle with 2 decimal places
+  
+  # Plot with ggplot2
+  ggplot(cor_melt, aes(Var2, Var1)) +
+    geom_tile(aes(fill = Correlation), color = "white", width = 0.95, height = 0.95) +
+    geom_text(aes(label = Label), color = "black", size = 6) +  # Show R-values & significance stars
+    scale_fill_gradient(low = "white", high = "red", 
+                        limit = c(0, 1),
+                        name = "Pearson's R") +
+    labs(x = NULL, y = NULL, fill = "R") + 
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 12, colour = "black"),
+          axis.text.y = element_text(size = 16, colour = "black"),
+          legend.title = element_text(size = 14, colour = "black"),
+          panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank()) +
+    coord_fixed()
+}
+```
+
+```{r, fig.width=12}
+cor_uc = data_corr |>
+  filter(disease == "Ulcerative colitis")|>
+  dplyr::select(UCEIS, Riley = normalized_riley_score, PMS,`UC-IPSS` = `UC.IPSS`,`bMIS-UC`=bMIS_UC)|>
+  unique() 
+ordered_uc_names <-  c("PMS", "UCEIS", "Riley", "bMIS-UC", "UC-IPSS")
+
+corr_plot_uc = plot_corr_matrix(cor_uc, ordered_uc_names) +
+  theme(legend.position = "none") 
+
+cor_cd = data_corr |>
+  filter(disease == "Crohn's disease")|>
+  dplyr::select(SES_CD, `Naini Cortina` = normalized_naini_cortina_score, HBI,`CD-IPSS` = `CD.IPSS`,`bMIS-CD`=bMIS_CD)|>
+  unique()
+ordered_cd_names <- c("HBI", "SES_CD", "Naini Cortina", "bMIS-CD", "CD-IPSS")
+
+corr_plot_cd = plot_corr_matrix(cor_cd, ordered_cd_names)
+
+# Combine plots with space
+corr_plot_uc + corr_plot_cd + plot_layout(guides = "collect") & theme(plot.margin = margin(10, 20, 10, 20))
+ggsave(file.path(params$artifact_dir, "Figure2d.pdf"), width = 6.5, height = 5)
+```
+
+### Session info
+
+```{r}
+sessionInfo()
+``` 

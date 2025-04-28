@@ -1,0 +1,218 @@
+---
+title: "Tissue-disease-specific inflammatory gene signatures"
+author: "chripla"
+date: "`r Sys.Date()`"
+output: html_document
+params:
+  database: "data/ibdome_v1.0.1.sqlite"
+  artifact_dir: "results"
+  de_results_dir: "results/DESeq2"
+---
+
+Load libraries:
+```{r}
+box::use(
+   lib/colors[COLORS],
+   lib/db[db_connect],
+   dplyr[...],
+   tidyr[pivot_wider],
+   tibble[column_to_rownames],
+   SummarizedExperiment[SummarizedExperiment, colData, assay, rowData, `rowData<-`],
+   DESeq2[vst, plotPCA, DESeqDataSet, estimateSizeFactors],
+   ggplot2[...],
+   cowplot[theme_cowplot, plot_grid, background_grid],
+   readr[write_csv, write_tsv]
+)
+``` 
+
+Connect to the IBDome database:
+```{r}
+DB = db_connect(params$database)
+dir.create(params$artifact_dir, showWarnings = FALSE)
+dir.create(params$de_results_dir, showWarnings = FALSE )
+``` 
+
+### Get RNA-seq data from the database
+
+```{r}
+rnaseq_samples_all = tbl(DB, "samples_subjects_tissues_with_inflammation") |> 
+  filter(sample_type == "RNA-seq") |>
+  collect()
+``` 
+
+Filter for tissue coarse:
+* ileum
+* colon
+
+disease:
+* CD
+* UC
+* non-IBD
+
+```{r}
+rnaseq_samples = rnaseq_samples_all |>
+  filter(disease %in% c("Crohn's disease", "non-IBD", "Ulcerative colitis"), tissue_coarse %in% c("colon", "ileum")) 
+```
+
+Get raw counts from database:
+```{r}
+count_mat = tbl(DB, "data_rnaseq") |> 
+  filter(sample_id %in% rnaseq_samples$sample_id) |> 
+  pivot_wider(id_cols = gene_id, names_from="sample_id", values_from="raw_counts") |>
+  collect() 
+```
+
+Get histo-scores from database:
+```{r}
+histo_all = tbl(DB, "samples_subjects_tissues") |>
+  inner_join(tbl(DB, "data_histopathology2"), by="sample_id") |> 
+  select(sample_id, date, subject_id, normalized_naini_cortina_score, normalized_riley_score, tissue_coarse) |>
+  collect()
+
+histo_rnaseq = histo_all |> 
+  inner_join(select(rnaseq_samples, rnaseq_sample_id=sample_id, subject_id, date, tissue_coarse), by=c("subject_id", "date", "tissue_coarse"), multiple="all") |> 
+  group_by(rnaseq_sample_id) |>
+  summarize(normalized_naini_cortina_score = median(normalized_naini_cortina_score, na.rm = TRUE),
+            normalized_riley_score = median(normalized_riley_score, na.rm = TRUE)) 
+```
+
+Combine RNAseq samples with histo-scores:
+```{r}
+rnaseq_obs = rnaseq_samples |> 
+  left_join(histo_rnaseq, by=c("sample_id"="rnaseq_sample_id")) 
+``` 
+
+To make samples comparable define a normalized inflammation score across Riley and Naini-Cortina scores:
+```{r}
+rnaseq_obs = rnaseq_obs |>
+  mutate(normalized_inflammation_score = rowMeans(cbind(normalized_naini_cortina_score, normalized_riley_score), na.rm=TRUE))
+``` 
+
+## Inspect covariates with prinicipal component analysis
+
+```{r}
+adata = SummarizedExperiment(
+  assays=list(counts=count_mat |> column_to_rownames("gene_id") |> as.matrix() |> round() |> (\(x) x[, rnaseq_obs$sample_id])()),
+  colData=rnaseq_obs |> column_to_rownames("sample_id"),
+  rowData = count_mat |> select(gene_id) |> left_join(collect(tbl(DB, "genes")), by=c("gene_id"="ensg"))
+)
+``` 
+
+Define covariates to plot:
+```{r}
+covariates = c("disease", "tissue_coarse", "normalized_inflammation_score")
+```
+
+```{r, fig.height=3, fig.width=15}
+dds = DESeqDataSet(adata, design=~1) 
+dds = estimateSizeFactors(dds)
+vsd = vst(dds)
+pca_res = plotPCA(vsd, returnData=TRUE, intgroup="disease") 
+pct_var = round(100 * attr(pca_res, "percentVar"))
+pca_df = pca_res |> as_tibble() |> select(name, PC1, PC2) |> 
+  inner_join(colData(dds) |> as_tibble(rownames="name"), by="name")
+  
+plots = lapply(covariates, function(x) {
+    p = ggplot(pca_df, aes_string(x="PC1", y="PC2", color=x)) + 
+      geom_point(size=2) + 
+      theme_bw() +
+      xlab(sprintf("PC1 (%s%% variance)", pct_var[1])) + 
+      ylab(sprintf("PC2 (%s%% variance)", pct_var[2])) +
+      theme(legend.position="right")
+    
+    # Check if the covariate is categorical or continuous
+    if (x %in% names(COLORS)) {
+      # Apply manual colors for categorical variables
+      p = p + scale_color_manual(values=COLORS[[x]])
+    } else if (is.numeric(pca_df[[x]])) {
+      title_text = sub("_", "\n", x)  # Replace first underscore with a new line
+      
+      # Apply continuous color scale for numeric variables
+      p = p + scale_color_viridis_c(option="magma") + 
+        guides(color = guide_colorbar(title = title_text))
+    }
+    
+    # Rename legend title from "tissue_coarse" to "tissue" only in this plot
+    if (x == "tissue_coarse") {
+      p = p + labs(color = "tissue")
+    }
+    # increase legend labels:
+    p <- p + theme(legend.text = element_text(size = 12))
+    # Force aspect ratio
+    p <- p + theme(aspect.ratio = 1)
+
+    # Convert ggplot object to a grob
+    p_grob <- ggplotGrob(p)  # Use ggplotGrob instead of print
+
+    return(p_grob) # Return the grob
+ })
+
+# Get the maximum width of the legend for consistent plot area
+legend_widths <- sapply(plots, function(p) {
+  legend_idx <- which(names(p$grobs) == "guide-box")
+  if (length(legend_idx) > 0) {
+    sum(p$grobs[[legend_idx]]$widths)
+  } else {
+    0 # No legend
+  }
+})
+max_legend_width <- max(legend_widths)
+
+# Add margin to each plot to account for the maximum legend width
+plots <- lapply(plots, function(p) {
+  # Convert grob back to ggplot object for adding margin
+  p <- ggplotify::as.ggplot(p)
+  p + theme(plot.margin = unit(c(5.5, max_legend_width, 5.5, 5.5), "pt"))
+})
+
+cowplot::plot_grid(plotlist = plots, ncol=3)
+ggsave(file.path(params$artifact_dir, "Figure3a.pdf"), width = 15, height = 3)
+``` 
+
+## DE analysis
+
+
+### Define inflammation-tissue groups
+```{r}
+rnaseq_sample_meta <- rnaseq_samples_all |>
+  mutate(group_fine = case_when(disease=="non-IBD" ~ "nonIBD",
+                                disease=="Crohn's disease" & inflammation_status == "inflamed" ~ "CD_inflamed",
+                                disease=="Crohn's disease" & inflammation_status == "non_inflamed" ~ "CD_non_inflamed",
+                                disease=="Ulcerative colitis" & inflammation_status == "inflamed" ~ "UC_inflamed",
+                                disease=="Ulcerative colitis" & inflammation_status == "non_inflamed" ~ "UC_non_inflamed",
+                                TRUE ~ "unknown"))
+
+# add tissue groups and scale age:
+rnaseq_sample_meta = rnaseq_sample_meta |>
+    mutate(group_tissue = paste(group_fine, tissue_coarse, sep = "_")) |>
+    mutate(age = as.numeric(format(as.Date(date), "%Y"))- birth_year) |>
+    mutate(age_scaled = scale(age)[,1])
+``` 
+
+### Export tables to run DESeq2 with nextflow pipeline
+
+### 1.) Meta data: 
+```{r}
+write_csv(rnaseq_sample_meta, file.path(params$de_results_dir, "meta_data_rnaseq.csv"))
+``` 
+
+### 2.) Counts table:
+```{r}
+# add gene names:
+count_mat_all = tbl(DB, "data_rnaseq") |> 
+  pivot_wider(id_cols = gene_id, names_from="sample_id", values_from="raw_counts") |>
+  left_join(tbl(DB, "genes") |> select(ensg, hgnc_symbol) |> rename(gene_name=hgnc_symbol, gene_id = ensg)) |> 
+  collect()
+
+# correct order:
+count_mat_all = count_mat_all[,c("gene_id", "gene_name", rnaseq_sample_meta$sample_id)]
+
+# save as tsv:
+write_tsv(count_mat_all, file.path(params$de_results_dir, "rnaseq_counts.tsv"))
+``` 
+
+### Session info
+
+```{r}
+sessionInfo()
+``` 

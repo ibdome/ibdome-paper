@@ -1,0 +1,788 @@
+---
+title: "Site-specific protein signatures"
+author: "chripla"
+date: "`r Sys.Date()`"
+output: html_document
+params:
+  database: "data/ibdome_v1.0.1.sqlite"
+  artifact_dir: "results"
+---
+
+Load libraries:
+```{r}
+box::use(
+   lib/colors[COLORS],
+   lib/db[db_connect],
+   dplyr[...],
+   OlinkAnalyze[olink_ttest],
+   patchwork[...],
+   tidyr[pivot_wider, drop_na],
+   tibble[column_to_rownames],
+   EnhancedVolcano[EnhancedVolcano],
+   ggplot2[...],
+   gridExtra[grid.arrange],
+   ggvenn[ggvenn],
+   readr[write_tsv],
+   purrr[map_dbl],
+   cowplot[theme_cowplot],
+   AnnotationDbi[select],
+   org.Hs.eg.db[...],
+   ComplexHeatmap[Heatmap, draw, HeatmapAnnotation, anno_empty, Legend],
+   grid[grid.text, gpar]
+)
+``` 
+
+Connect to the IBDome database:
+```{r}
+DB = db_connect(params$database)
+dir.create(params$artifact_dir, showWarnings = FALSE)
+``` 
+
+
+Get protein meta data from database:
+```{r}
+meta_data_olink = tbl(DB, "samples_subjects_tissues_with_inflammation") |>
+  filter(sample_type == "Olink") |>
+  filter(! is.na(disease)) |>
+  dplyr::select(sample_id, subject_id, date, tissue, sample_type, dataset, disease, sex, birth_year, localization_cd, localization_uc, inflammation_status) |>
+  collect() |>
+  mutate(group_tissue = case_when(disease == "Ulcerative colitis" & inflammation_status == "inflamed" ~ "UC_colon",
+                                  disease == "Crohn's disease" & inflammation_status == "inflamed" & localization_cd == "L1: terminal ileum" ~ "CD_ileum",
+                                  disease == "Crohn's disease" & inflammation_status == "inflamed" & (localization_cd == "L2: colon" | localization_cd == "L3: ileocolon") ~ "CD_colon",
+                                  disease == "non-IBD" ~ "nonIBD",
+                                  TRUE ~ NA))
+```
+
+### Get Olink protein NPX data
+
+NPX = normalized protein expression (Olink's arbitrary unit)
+
+```{r}
+olink_data = tbl(DB, "data_olink") |>
+  filter(sample_id %in% meta_data_olink$sample_id) |>
+  collect() 
+
+# convert to matrix:
+olink_matrix = olink_data |>
+  dplyr::select(-OlinkID,-UniProt) |>
+  pivot_wider(names_from = Assay,values_from = NPX)
+```
+
+Prepare input data frame:
+long format with metadata
+```{r}
+npx_data = olink_data |>
+  left_join(meta_data_olink |> dplyr::select(sample_id, group_tissue)) |>
+  rename("SampleID" = "sample_id") |>
+  mutate(Panel = "Olink Inflammation")
+
+## filter for Assays, that have at least 90% non missing values:
+complete_cases <- olink_matrix |>
+  dplyr::select(where(~sum(!is.na(.)) > nrow(olink_matrix)*0.1))|>
+  column_to_rownames("sample_id") |>
+  names()
+``` 
+
+## DE analysis
+
+### Define significance threshold
+
+```{r}
+sig_threshold = 0.1
+```
+
+
+### CD colon vs. non-IBD
+
+Subset data frame:
+```{r}
+npx_data_CD_colon <- npx_data |>
+  filter(group_tissue %in% c("nonIBD", "CD_colon")) |>
+  filter(Assay %in% complete_cases)
+``` 
+
+Welch t-test:
+```{r}
+t_res_CD_colon = olink_ttest(npx_data_CD_colon, variable="group_tissue")
+
+sig_CD_colon = t_res_CD_colon |>
+  filter(Adjusted_pval < sig_threshold) |>
+  mutate(gene = ifelse(estimate > 0, paste0(Assay, "_up"), paste0(Assay, "_down")))
+``` 
+
+Write results table to file:
+```{r}
+write_tsv(t_res_CD_colon |> dplyr::select(-Threshold), file=file.path(params$artifact_dir, "ExtendedDataTable8_CDcolon.tsv"))
+``` 
+
+Plot with proteins of interest:
+
+```{r}
+poi_CD <- c("TNF", "IL-12B", "AXIN1", "OSM", "TNFSF14", "IFN-gamma")
+``` 
+
+```{r, fig.height=5, fig.width=5}
+v1_poi = EnhancedVolcano(t_res_CD_colon,
+    lab = t_res_CD_colon$Assay,
+    selectLab = poi_CD,
+    drawConnectors = TRUE,
+    x = 'estimate',
+    y = 'Adjusted_pval',
+    title = 'CD colon vs. non-IBD',
+    subtitle="",
+    pCutoff = sig_threshold,
+    FCcutoff = 0,
+    xlim = c(-1,1.5),
+    ylim = c(0, 6),
+    xlab = bquote(~log[2] ~ "fold change"),
+    ylab = bquote(~-log[10] ~ italic((FDR))),
+    legendPosition = 'none')
+``` 
+
+### CD ileum vs. non-IBD
+
+Subset data frame:
+```{r}
+npx_data_CD_ileum <- npx_data |>
+  filter(group_tissue %in% c("nonIBD", "CD_ileum")) |>
+  filter(Assay %in% complete_cases)
+``` 
+
+Welch t-test:
+```{r}
+t_res_CD_ileum = olink_ttest(npx_data_CD_ileum, variable="group_tissue")
+
+sig_CD_ileum = t_res_CD_ileum |>
+  filter(Adjusted_pval < sig_threshold) |>
+  mutate(gene = ifelse(estimate > 0, paste0(Assay, "_up"), paste0(Assay, "_down")))
+``` 
+
+Write results table to file:
+```{r}
+write_tsv(t_res_CD_ileum |> dplyr::select(-Threshold), file=file.path(params$artifact_dir, "ExtendedDataTable9_CDileum.tsv"))
+``` 
+
+```{r, fig.height=5, fig.width=8}
+v2_poi = EnhancedVolcano(t_res_CD_ileum,
+    lab = t_res_CD_ileum$Assay,
+    selectLab = poi_CD,
+    drawConnectors = TRUE,
+    x = 'estimate',
+    y = 'Adjusted_pval',
+    title = 'CD ileum vs. non-IBD',
+    subtitle="",
+    pCutoff = sig_threshold,
+    FCcutoff = 0,
+    xlim = c(-0.7,2),
+    ylim = c(0, 4),
+    xlab = bquote(~log[2] ~ "fold change"),
+    ylab = bquote(~-log[10] ~ italic((FDR))),
+    legendPosition = 'none')
+``` 
+
+### UC colon vs. non-IBD
+
+Subset data frame:
+```{r}
+npx_data_UC_colon <- npx_data |>
+  filter(group_tissue %in% c("nonIBD", "UC_colon")) |>
+  filter(Assay %in% complete_cases)
+
+npx_data_UC_colon$group_tissue = as.factor(npx_data_UC_colon$group_tissue)
+npx_data_UC_colon$group_tissue = relevel(npx_data_UC_colon$group_tissue, ref="UC_colon")
+``` 
+
+Welch t-test:
+```{r}
+t_res_UC_colon <- olink_ttest(npx_data_UC_colon, variable = "group_tissue")
+
+sig_UC_colon = t_res_UC_colon |>
+  filter(Adjusted_pval < sig_threshold) |>
+  mutate(gene = ifelse(estimate > 0, paste0(Assay, "_up"), paste0(Assay, "_down")))
+``` 
+
+Write results table to file:
+```{r}
+write_tsv(t_res_UC_colon |> dplyr::select(-Threshold), file=file.path(params$artifact_dir, "ExtendedDataTable10_UCcolon.tsv"))
+``` 
+
+```{r}
+poi_UC <- c("TNF", "IL-12B", "AXIN1", "OSM", "TNFSF14")
+``` 
+
+```{r, fig.height=5, fig.width=8}
+v3_poi = EnhancedVolcano(t_res_UC_colon,
+    lab = t_res_UC_colon$Assay,
+    selectLab = poi_UC,
+    drawConnectors = TRUE,
+    x = 'estimate',
+    y = 'Adjusted_pval',
+    title = 'UC colon vs. non-IBD',
+    subtitle="",
+    pCutoff = sig_threshold,
+    FCcutoff = 0,
+    xlim = c(-0.7,1.5),
+    ylim = c(0, 5.5),
+    xlab = bquote(~log[2] ~ "fold change"),
+    ylab = bquote(~-log[10] ~ italic((FDR))),
+    legendPosition = 'right')
+``` 
+
+Show combined plot:
+```{r, fig.height=5, fig.width=18}
+Fig4a = grid.arrange(v1_poi, v2_poi, v3_poi, ncol = 3, widths=c(5,5,8))
+ggsave(file.path(params$artifact_dir, "Figure4a.pdf"), plot=Fig4a, device='pdf', width=18, height = 5)
+Fig4a
+```
+
+
+### Display overlap
+
+Plot VennDiagramm:
+```{r, fig.height=5, fig.width=5}
+# Define colors:
+myCol <- c("#E69F00", "#56B4E9", "#d95f02")
+
+genelists <- list("CD colon" = sig_CD_colon$gene, 
+                  "CD ileum" = sig_CD_ileum$gene,
+                  "UC colon" = sig_UC_colon$gene)
+
+ggvenn(genelists, fill_color=myCol, show_percentage = FALSE, label_sep= "\n", text_size=6)
+```
+
+
+
+### Get overlapping proteins across all conditions
+```{r}
+intersection_all = intersect(sig_CD_colon$gene, intersect(sig_CD_ileum$gene, sig_UC_colon$gene))
+intersection_all
+``` 
+
+CD overlap
+
+```{r}
+intersection_CD = intersect(sig_CD_colon$gene, sig_CD_ileum$gene)
+intersection_CD
+``` 
+
+colon overlap
+```{r}
+intersection_colon = intersect(sig_CD_colon$gene, sig_UC_colon$gene)
+intersection_colon
+``` 
+
+### Get uniquely differential abundant proteins
+
+1. CD ileum
+
+```{r}
+CD_ileum_unique = setdiff(sig_CD_ileum$gene, union(sig_CD_colon$gene, sig_UC_colon$gene))
+CD_ileum_unique
+``` 
+
+2. CD colon
+
+```{r}
+CD_colon_unique = setdiff(sig_CD_colon$gene, union(sig_CD_ileum$gene, sig_UC_colon$gene))
+CD_colon_unique
+``` 
+
+3. UC colon
+
+```{r}
+UC_colon_unique = setdiff(sig_UC_colon$gene, union(sig_CD_ileum$gene, sig_CD_colon$gene))
+UC_colon_unique
+``` 
+
+## Correlation of serum protein abundance and histopathology scores
+
+
+### Define groups according to the disease localization:
+
+* UC colon
+* CD ileum: isolated ileal disease
+* CD colon: ileocolonic and colon 
+
+```{r}
+protein = tbl(DB, "samples_subjects_tissues") |> 
+  inner_join(tbl(DB, "data_olink")) |> 
+  filter(disease %in% c("Crohn's disease", "Ulcerative colitis", "non-IBD")) |> 
+  mutate(group_tissue = case_when(disease == "Ulcerative colitis"  ~ "UC_colon",
+                                  disease == "Crohn's disease" & localization_cd == "L1: terminal ileum" ~ "CD_ileum",
+                                  disease == "Crohn's disease" & (localization_cd == "L2: colon" | localization_cd == "L3: ileocolon") ~ "CD_colon",
+                                  disease == "non-IBD" ~ "nonIBD",
+                                  TRUE ~ NA)) |>
+    collect() |>
+    mutate(date = as.Date(date))
+``` 
+
+
+### Merge with histopathology scores
+
+Merge by subject_id and date; note that there might be multiple entries per patient as we want to take into account all different tissues and their individual scores!
+```{r}
+histo = tbl(DB, "samples") |> inner_join(tbl(DB, "data_histopathology2"), by="sample_id") |> inner_join(tbl(DB, "tissues"), by="tissue") |> collect()
+
+histo_scores = histo |>
+  group_by(subject_id, date, tissue_coarse) |> 
+  summarise_at(vars(modified_naini_cortina_score, modified_riley_score, normalized_naini_cortina_score, normalized_riley_score), \(x) mean(x, na.rm=TRUE)) |>
+  mutate(date = as.Date(date))
+
+protein_vs_histo = histo_scores |> inner_join(protein, by=c("subject_id", "date")) |>
+  dplyr::select(subject_id, date, tissue_coarse.x, modified_naini_cortina_score, modified_riley_score, normalized_naini_cortina_score, normalized_riley_score,
+                sample_id, disease, sex, localization_cd, localization_uc, Assay, NPX, group_tissue)
+``` 
+
+### Define correlation function 
+
+```{r}
+prot_histo_correlation <- function(cordata, condition, histoscore){
+  # Perform correlation analysis per Assay
+cor_results <- cordata |>
+  group_by(Assay) |>  # Group by Assay
+  summarise(
+    cor_test = list(
+      tryCatch(
+        cor.test(NPX, .data[[histoscore]], method = "pearson"),
+        error=function(e) return(NA)
+        )
+  ),
+  .groups= "drop"
+  ) |>
+  mutate(
+    correlation = sapply(cor_test, function(x) ifelse(is.list(x), x$estimate, NA)),
+    p_value = sapply(cor_test, function(x) ifelse(is.list(x), x$p.value, NA))
+  ) |>
+  dplyr::select(-cor_test)  # Remove list column
+
+# Adjust p-value
+cor_results <- cor_results |>
+  mutate(adj_p_value = p.adjust(p_value, method = "BH"))  # Adjust using FDR (Benjamini-Hochberg)
+
+# Prepare dataframe for plotting
+cor_results <- cor_results |>
+  mutate(condition = condition)
+
+return(cor_results)
+}
+``` 
+
+### Get correlations for the different groups
+
+Prepare data frames: 
+```{r}
+UC_colon_prot_vs_histo = protein_vs_histo |>
+  filter((disease == "Ulcerative colitis") & (! is.na(modified_riley_score) & (tissue_coarse.x != "ileum")))
+
+CD_prot_vs_histo = protein_vs_histo |>
+  filter((disease == "Crohn's disease") & (! is.na(modified_naini_cortina_score)))
+
+CD_ileum_prot_vs_histo = CD_prot_vs_histo |>
+  filter((group_tissue == "CD_ileum") & (tissue_coarse.x == "ileum" | tissue_coarse.x == "small intestine"))
+
+CD_colon_prot_vs_histo = CD_prot_vs_histo |>
+  filter((group_tissue == "CD_colon") & (tissue_coarse.x != "ileum" & tissue_coarse.x != "small intestine" & tissue_coarse.x != "anastomosis"))
+``` 
+
+Run correlation analysis:
+```{r}
+cor_results_UC_colon = prot_histo_correlation(UC_colon_prot_vs_histo, "UC colon", "modified_riley_score")
+cor_results_CD_colon = prot_histo_correlation(CD_colon_prot_vs_histo, "CD colon", "modified_naini_cortina_score")
+cor_results_CD_ileum = prot_histo_correlation(CD_ileum_prot_vs_histo, "CD ileum", "modified_naini_cortina_score")
+``` 
+
+Combine results for plotting:
+```{r}
+cor_results_combined <- bind_rows(cor_results_UC_colon, cor_results_CD_colon, cor_results_CD_ileum)
+```
+
+Define plotting order:
+```{r}
+cor_results_combined$condition <- factor(cor_results_combined$condition, levels=c("UC colon", "CD colon", "CD ileum"))
+``` 
+
+### Filter for proteins, that are significant in at least one condition
+
+```{r}
+cor_results_combined_sig = cor_results_combined |>
+  group_by(Assay) |>
+  filter(any(adj_p_value < 0.01)) |>
+  ungroup() |>
+  mutate(significance = ifelse(adj_p_value < 0.01, "significant", "not significant"))
+``` 
+
+### Create plot
+
+```{r, fig.height=13, fig.width=6.5}
+# Define the proteins to highlight
+highlighted_proteins <- c("MMP-10", "IL-17A", "TGF-alpha", "IL7", "CCL11", "IL10", "SLAMF1", "IFN-gamma")
+
+# Create a separate data frame for coloring
+highlight_df <- data.frame(
+  protein = highlighted_proteins,
+  xmin = 0.5,  # Adjust to fit your x-axis range
+  xmax = 3.5,
+  ymin = match(highlighted_proteins, levels(reorder(cor_results_combined_sig$Assay, cor_results_combined_sig$correlation))) - 0.5,
+  ymax = match(highlighted_proteins, levels(reorder(cor_results_combined_sig$Assay, cor_results_combined_sig$correlation))) + 0.5,
+  color = "#EBAD7F" 
+)
+
+# change colors for CD specific and for CD colon specific proteins:
+highlight_df <- highlight_df |>
+  mutate(color= case_when(protein == "IFN-gamma" ~ "#A3BFB3",
+                          protein == "SLAMF1" ~ "#F2CD7E",
+                          TRUE ~ color))
+
+ggplot(cor_results_combined_sig, aes(x = condition, y = reorder(Assay, correlation))) +
+  # Add background rectangles for highlighted proteins
+  geom_rect(data = highlight_df, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill=color),
+            alpha = 0.4, inherit.aes = FALSE) +  
+  scale_fill_identity() +
+  geom_point(aes(size = abs(correlation), color = correlation)) +  # Dot size = |R|, color = R
+  scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +  
+  scale_size_continuous(range = c(2, 10)) +  # Adjust dot size
+  geom_point(aes(shape = significance), size = 6, color = "black", show.legend = TRUE) +  
+  scale_shape_manual(values = c("significant" = 8), name = "adj.p < 0.01") +
+  theme_cowplot() +
+  labs(x = NULL,
+       y = NULL,
+       color = "Pearson's R",
+       size = "abs(Pearson's R)") +
+  theme(axis.text.y = element_text(size = 14), 
+        legend.position="right",
+        axis.text.x = element_text(size = 14)) +
+  scale_y_discrete(expand= expansion(mult = c(0.015,0.04))) + 
+  annotate("label", x = 1, y = length(unique(cor_results_combined_sig$Assay))+0.7, 
+           label = "modified Riley", size = 4, vjust = 0, fill="lightgrey") +
+  annotate("label", x = mean(c(2,3)), y = length(unique(cor_results_combined_sig$Assay))+0.7, 
+           label = "modified Naini Cortina",  size =4, vjust = 0, fill="lightgrey") 
+
+ggsave(file.path(params$artifact_dir, "Figure4c.pdf"), height = 13, width = 6.5)
+``` 
+
+
+### Get correlations for all / colon / ileum samples
+
+
+To compare across diseases/tissues we need to use the normalized histopathology scores:
+```{r}
+colon = protein_vs_histo |> 
+  filter(tissue_coarse.x %in% c("colon", "rectum", "caecum")) |>
+  filter(group_tissue != "CD_ileum") |>      
+  mutate(normalized_inflammation = max(normalized_naini_cortina_score, normalized_riley_score, na.rm=TRUE))
+
+ileum = protein_vs_histo |>
+  filter(tissue_coarse.x %in% c("ileum", "small intestine")) |>
+  filter(group_tissue != "UC_colon" & (is.na(localization_cd) | localization_cd != "L2: colon")) |>
+  mutate(normalized_inflammation = max(normalized_naini_cortina_score, normalized_riley_score, na.rm=TRUE))
+
+all = protein_vs_histo |>
+   mutate(normalized_inflammation = max(normalized_naini_cortina_score, normalized_riley_score, na.rm=TRUE))
+``` 
+
+
+Run correlation analysis:
+```{r}
+cor_results_all = prot_histo_correlation(all, "all", "normalized_inflammation")
+cor_results_colon = prot_histo_correlation(colon, "colon", "normalized_inflammation")
+cor_results_ileum = prot_histo_correlation(ileum, "ileum", "normalized_inflammation")
+``` 
+
+Combine results for plotting:
+```{r}
+cor_results_combined_all <- bind_rows(cor_results_all, cor_results_colon, cor_results_ileum)
+```
+
+Define plotting order:
+```{r}
+cor_results_combined_all$condition <- factor(cor_results_combined_all$condition, levels=c("all", "colon", "ileum"))
+``` 
+
+Define significance for plotting:
+```{r}
+cor_results_combined_all = cor_results_combined_all |>
+  mutate(significance = ifelse(adj_p_value < 0.01, "significant", "not significant"))
+``` 
+
+```{r, fig.height=22, fig.width=6}
+# Define the proteins to highlight
+highlighted_proteins_all <- c("CXCL1", "HGF", "CCL20", "CXCL11", "LAP TGF-beta-1", "IL-24", "EN-RAGE", "CCL25")
+
+# Create a separate data frame for coloring
+highlight_df_all <- data.frame(
+  protein = highlighted_proteins_all,
+  xmin = 0.5,  # Adjust to fit your x-axis range
+  xmax = 3.5,
+  ymin = match(highlighted_proteins_all, levels(reorder(cor_results_combined_all$Assay, cor_results_combined_all$correlation))) - 0.5,
+  ymax = match(highlighted_proteins_all, levels(reorder(cor_results_combined_all$Assay, cor_results_combined_all$correlation))) + 0.5,
+  color = "#E69640" 
+)
+
+ggplot(cor_results_combined_all, aes(x = condition, y = reorder(Assay, correlation))) +
+  # Add background rectangles for highlighted proteins
+  geom_rect(data = highlight_df_all, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill=color),
+            alpha = 0.4, inherit.aes = FALSE) +  
+  scale_fill_identity() +
+  geom_point(aes(size = abs(correlation), color = correlation)) +  # Dot size = |R|, color = R
+  scale_color_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +  
+  scale_size_continuous(range = c(2, 10)) +  # Adjust dot size
+  geom_point(aes(shape = significance), size = 6, color = "black", show.legend = TRUE) +  
+  scale_shape_manual(values = c("significant" = 8), name = "adj.p < 0.01") +
+    geom_rect(aes(xmin = 0.5, xmax = 3.5, ymin = length(unique(cor_results_combined_all$Assay))+ 2 , 
+                ymax = length(unique(cor_results_combined_all$Assay))+0.9), 
+            fill = "lightgrey", color = NA) +
+  annotate("text", x = 2, y = length(unique(cor_results_combined_all$Assay))+1.5 , 
+           label = "normalized inflammation", size = 5) +
+  theme_cowplot() +
+  labs(x = NULL,
+       y = NULL,
+       color = "Pearson's R",
+       size = "abs(Pearson's R)") +
+  theme(axis.text.y = element_text(size = 14), 
+        legend.position="right",
+        axis.text.x = element_text(size=14)) +
+  scale_y_discrete(expand= expansion(mult = c(0.01,0.02)))
+
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure4b.pdf"), height = 22, width = 6)
+``` 
+
+## Correlation of serum protein abundance and tissue gene expression
+
+
+### Get matching samples (patient and date)
+
+
+Get RNA-seq metadata: 
+```{r}
+meta_data_rna <- tbl(DB, "samples_subjects_tissues_with_inflammation") |>
+  filter(sample_type == "RNA-seq") |>
+  collect() |>
+  mutate(date = as.Date(date))
+``` 
+
+Merge with olink meta data:
+```{r}
+olink_rna = meta_data_olink |>
+  dplyr::select(sample_id, subject_id, date) |>
+  mutate(date=as.Date(date)) |>
+  inner_join(meta_data_rna, by=c("subject_id", "date"))
+``` 
+
+### Get actual data from database
+
+1.) Olink protein data:
+```{r}
+olink_data <- npx_data |>
+  rename("sample_id" = "SampleID") |>
+  filter(sample_id %in% olink_rna$sample_id.x)
+``` 
+
+Convert protein names to gene symbols:
+```{r}
+gene_symbols <- AnnotationDbi::select(org.Hs.eg.db, keys=unique(olink_data$UniProt), keytype="UNIPROT", columns=c("SYMBOL"))
+``` 
+
+Convert Olink data to matrix:
+```{r}
+olink_mat <- olink_data |>
+  pivot_wider(id_cols=UniProt, names_from="sample_id", values_from="NPX") |>
+  column_to_rownames('UniProt')
+``` 
+
+Ensure correct order: 
+```{r}
+# order:
+olink_mat <- olink_mat[gene_symbols$UNIPROT, olink_rna$sample_id.x]
+```
+
+2.) Gene expression data: 
+
+```{r}
+rnaseq_data <- tbl(DB, "data_rnaseq") |>
+  left_join(tbl(DB, "genes") |> dplyr::select(ensg, hgnc_symbol), join_by (gene_id == ensg)) |>
+  filter(sample_id %in% olink_rna$sample_id.y) |>
+  filter(hgnc_symbol %in% gene_symbols$SYMBOL) |>
+  collect()
+
+# get matrix:
+tpm_mat <- rnaseq_data |> pivot_wider(id_cols=hgnc_symbol, names_from="sample_id", values_from="tpm") |>
+  column_to_rownames('hgnc_symbol')
+
+# order:
+tpm_mat <- tpm_mat[gene_symbols$SYMBOL, olink_rna$sample_id.y]
+
+# transform to log10:
+tpm_mat <- log10(tpm_mat + 1)
+``` 
+
+### Gene-wise correlation
+
+Define conditions:
+```{r}
+olink_rna <- olink_rna |>
+  mutate(group_tissue=case_when(disease == "Ulcerative colitis" & tissue_coarse %in% c("colon", "caecum", "rectum") ~ "UC colon",
+                             disease == "Crohn's disease" & tissue_coarse == "ileum" ~ "CD ileum",
+                             disease == "Crohn's disease" & tissue_coarse %in% c("colon", "caecum", "rectum") ~ "CD colon", 
+                             TRUE ~ NA))
+``` 
+
+Initialize data frames:
+```{r}
+gene_cor_disease <- data.frame(gene = rownames(tpm_mat))
+conditions = c("all", "ileum", "colon", "CD colon", "CD ileum", "UC colon")
+n_samples <- data.frame(condition = conditions)
+
+for (d in conditions) {
+  
+  if (d == "all") {
+    tmp_tpm = tpm_mat
+    tmp_olink = olink_mat
+  } else if (d %in% unique(olink_rna$group_tissue)){
+    tmp_disease <- olink_rna |>
+    filter(group_tissue == d)
+  
+    tmp_tpm <- tpm_mat[, tmp_disease$sample_id.y]
+    tmp_olink <- olink_mat[, tmp_disease$sample_id.x]
+  } else {
+    tmp_tissue <- olink_rna |>
+      filter(tissue_coarse == d)
+    
+    tmp_tpm <- tpm_mat[, tmp_tissue$sample_id.y]
+    tmp_olink <- olink_mat[, tmp_tissue$sample_id.x]
+  }
+  
+  # Get number of samples per condition:
+  n_samples$sample_count[n_samples$condition == d] = ncol(tmp_tpm)
+
+  # Initialize vectors to store correlation coefficients and p-values
+  cor_values <- numeric(nrow(tpm_mat))
+  p_values <- numeric(nrow(tpm_mat))
+  
+  for (j in 1:nrow(tpm_mat)) {
+    tpm_values <- t(tmp_tpm[j, ])
+    olink_values <- t(tmp_olink[j, ])
+    
+    # Check for minimum number of non-NA pairwise comparisons
+    valid_pairs <- sum(!is.na(tpm_values) & !is.na(olink_values))
+    
+    if (valid_pairs >= 4) {
+      # Calculate the Pearson correlation and p-value
+      tmp_cor <- cor.test(tpm_values, olink_values, use = "pairwise.complete.obs", method = "pearson")
+      
+      # Store the correlation coefficient and p-value
+      cor_values[j] <- tmp_cor$estimate
+      p_values[j] <- tmp_cor$p.value
+    } else {
+      # Store NA if there are not enough valid pairs
+      cor_values[j] <- NA
+      p_values[j] <- NA
+    }
+  }
+  
+  # Adjust p-values for multiple testing
+  adj_p_values <- p.adjust(p_values, method = "BH")  # Benjamini-Hochberg adjustment
+  
+  # Store the results in the data frame
+  gene_cor_disease[[d]] <- cor_values
+  gene_cor_disease[[paste0("p_", d)]] <- p_values
+  gene_cor_disease[[paste0("adj_p_", d)]] <- adj_p_values
+}
+``` 
+
+Print number of samples per condition: 
+```{r}
+n_samples
+``` 
+
+Visualize in heatmap:
+```{r, fig.height=22, fig.width=5}
+# order in descending order of "all":
+gene_cor_disease = gene_cor_disease |>
+  arrange(desc(all))
+  
+cor_mat = gene_cor_disease |>
+  column_to_rownames("gene") |>
+  dplyr::select(conditions) |>
+  as.matrix(drop=FALSE) 
+
+p_mat = gene_cor_disease |>
+  column_to_rownames("gene") |>
+  dplyr::select(adj_p_all,  adj_p_ileum, adj_p_colon, `adj_p_CD colon`, `adj_p_CD ileum`, `adj_p_UC colon`) |>
+  mutate(across(everything(), ~ ifelse(is.na(.) | . >= 0.05, "", "*"))) |>
+  as.matrix(drop=FALSE)
+
+ht <- Heatmap(cor_mat,
+        column_split = c("all", rep("tissue", 2), rep("disease_tissue", 3)),
+        cluster_rows = FALSE, 
+        cluster_columns = FALSE,
+        column_title = NULL,
+        row_names_side = "left",
+        row_names_gp = gpar(fontface = "italic"),
+        heatmap_legend_param = list(
+          title = "Pearson's R"),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          grid.text(p_mat[i, j], x, y, gp = gpar(fontsize = 20))
+        }
+)
+
+## add significance legend
+lgd_sig = Legend(pch = "*", type = "points", labels = "adj.p < 0.05", labels_gp=gpar(fontsize=12))
+
+draw(ht,
+     annotation_legend_list = list(lgd_sig),
+     merge_legend=TRUE)
+
+pdf(file=file.path(params$artifact_dir, "ExtendedDataFigure4c.pdf"), width=5, height=22)
+draw(ht,
+     annotation_legend_list = list(lgd_sig),
+     merge_legend=TRUE)
+dev.off()
+``` 
+
+
+Plot only significant correlations for group tissues: 
+
+```{r, fig.height=12, fig.width=2}
+conditions_of_interest <- c("UC colon", "CD colon", "CD ileum")
+
+# Filter p_mat for significant genes across all conditions
+significant_genes <- rowSums(p_mat[,paste0("adj_p_", conditions_of_interest)] == "*") > 0
+
+# Subset p_mat and cor_mat for both significant genes and the conditions of interest
+p_mat_filtered <- p_mat[significant_genes, paste0("adj_p_", conditions_of_interest), drop = FALSE]
+cor_mat_filtered <- cor_mat[significant_genes, conditions_of_interest, drop = FALSE]
+
+# Create and draw the heatmap for significant genes and selected conditions
+ht_filtered <- Heatmap(cor_mat_filtered,
+                       cluster_rows = FALSE, 
+                       cluster_columns = FALSE,
+                       row_names_side = "left",
+                       row_names_gp = gpar(fontface = "italic"),
+                       width = unit(ncol(cor_mat_filtered) * 10, "mm"),  # Adjust width for square cells
+                       height = unit(nrow(cor_mat_filtered) * 10, "mm"),  # Adjust height for square cells
+                       rect_gp = gpar(col = "white", lwd = 2),  # Add space between cells 
+                       name = "Pearson's R",
+                       cell_fun = function(j, i, x, y, width, height, fill) {
+                            grid.text(p_mat_filtered[i, j], x, y, gp = gpar(fontsize = 20))
+                      }
+                      )
+
+draw(ht_filtered,
+     annotation_legend_list = list(lgd_sig),
+     heatmap_legend_side = "bottom",
+     merge_legend=TRUE)
+
+pdf(file=file.path(params$artifact_dir, "Figure4d.pdf"), width=2, height=12)
+draw(ht_filtered,
+     annotation_legend_list = list(lgd_sig),
+     heatmap_legend_side = "bottom",
+     merge_legend=TRUE)
+dev.off()
+```
+
+
+### Session info
+
+```{r}
+sessionInfo()
+``` 

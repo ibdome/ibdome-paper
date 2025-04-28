@@ -1,0 +1,243 @@
+---
+title: "Extract normalized histo scores for the existing images including disease information"
+author: "sandrocarollo"
+date: "`r Sys.Date()`"
+output: html_document
+params:
+  database: "data/ibdome_v1.0.1.sqlite"
+  resultdir: "./results/metadata_HE"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load libraries:
+
+```{r}
+box::use(
+   dplyr[...],
+   lib/db[db_connect],
+)
+```
+
+Connect to the IBDome database:
+
+```{r}
+DB = db_connect(params$database)
+dir.create(params$resultdir, showWarnings = FALSE)
+```
+
+### Getting Histology samples metadata
+
+```{r}
+samples_HE <- tbl(DB, "data_he_staining") |>
+  left_join(tbl(DB, "samples")) |>
+  select(c("sample_id", "orig_id", "ibdome_id", "subject_id", "date", "tissue", "sampling_procedure" )) |>
+  collect()
+
+samples_histo <- tbl(DB, "data_histopathology2") |>
+  left_join(tbl(DB, "samples")) |>
+  select(c("sample_id", "modified_naini_cortina_score", "modified_riley_score", "normalized_naini_cortina_score",  "normalized_riley_score", "ibdome_id", "date",  "tissue", "sampling_procedure")) |>
+  collect()
+
+samples_subjects_tissues <- tbl(DB, "samples_subjects_tissues") |>
+  select("ibdome_id", "date", "tissue", "disease", "sex", "sampling_procedure") |>
+  collect() |>
+  unique()
+
+samples_rna <- tbl(DB, "samples") |>
+  filter(sample_type == "RNA-seq") |>
+  select("subject_id", "ibdome_id", "date", "tissue", "sample_id") |>
+  collect()
+
+samples_all <- samples_HE |>
+  left_join(samples_histo, by=c("ibdome_id", "date", "tissue", "sampling_procedure")) |>
+  left_join(samples_subjects_tissues, by=c("ibdome_id", "date", "tissue", "sampling_procedure"))
+
+# Getting Histo-RNA samples
+samples_all_rna <- samples_all |>
+  left_join(samples_rna, by = c("subject_id", "date", "tissue")) |>
+  filter(!is.na(sample_id))
+```
+
+Getting Endoscopy score
+
+```{r}
+samples_Endo <- tbl(DB, "data_endoscopy") |>
+  left_join(tbl(DB, "samples")) |>
+  select(c("subject_id", "sample_id", "date", "SES_CD", "UCEIS" )) |>
+  collect()
+write.csv(samples_Endo, file.path(params$resultdir, "Endo_scores.csv"), row.names = FALSE, quote = FALSE)
+
+```
+
+Get duplicates:
+
+```{r}
+dups = samples_all[duplicated(samples_all$sample_id.x),]
+dups_rna = samples_all_rna[duplicated(samples_all_rna$sample_id.x),]
+```
+
+Duplicates removal:
+
+```{r}
+# Group by the columns that should be unique and summarize the numeric columns
+samples_all_unique <- samples_all %>%
+  group_by(sample_id.x, subject_id, orig_id, ibdome_id, date, tissue, disease, sex, sampling_procedure) %>%
+  summarize(
+    modified_naini_cortina_score = mean(modified_naini_cortina_score, na.rm = TRUE),
+    modified_riley_score = mean(modified_riley_score, na.rm = TRUE),
+    normalized_naini_cortina_score = mean(normalized_naini_cortina_score, na.rm = TRUE),
+    normalized_riley_score = mean(normalized_riley_score, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+samples_all_unique_rna <- samples_all_rna %>%
+  group_by(sample_id.x, subject_id, orig_id, date, tissue, disease, sex, sampling_procedure, sample_id) %>%
+  summarize(
+    modified_naini_cortina_score = mean(modified_naini_cortina_score, na.rm = TRUE),
+    modified_riley_score = mean(modified_riley_score, na.rm = TRUE),
+    normalized_naini_cortina_score = mean(normalized_naini_cortina_score, na.rm = TRUE),
+    normalized_riley_score = mean(normalized_riley_score, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Check if there are still duplicates
+dups_after <- samples_all_unique[duplicated(samples_all_unique$sample_id.x),]
+dups_rna_after <- samples_all_unique_rna[duplicated(samples_all_unique_rna$sample_id.x),]
+```
+
+Create the slide.csv input file for STAMP pipeline
+NOTE: PATIENT refers only to sample in our case, not the actual patient.
+
+```{r}
+slide_data <- samples_all_unique %>%
+  select(FILENAME = orig_id, PATIENT = sample_id.x)
+
+# Add "_class_tokens" suffix to FILENAME column for Virchow2 model
+slide_data_class_token <- slide_data %>%
+  mutate(FILENAME = paste0(FILENAME, "_class_tokens"))
+
+# Write slide_class_token.csv
+write.csv(slide_data, file.path(params$resultdir, "slide.csv"), row.names = FALSE, quote = FALSE)
+write.csv(slide_data_class_token, file.path(params$resultdir, "slide_class_token.csv"), row.names = FALSE, quote = FALSE)
+```
+
+Patients with at least one score
+
+```{r}
+# Rename sample_id.x to PATIENT
+samples_all_unique <- samples_all_unique %>%
+  rename(PATIENT = sample_id.x)
+samples_all_unique_rna <- samples_all_unique_rna %>%
+  rename(PATIENT = sample_id.x)
+
+write.csv(samples_all_unique, file.path(params$resultdir, "samples_all_unique.csv"), row.names = FALSE, quote = FALSE)
+# Filter to include only patients with at least one score
+samples_with_scores <- samples_all_unique %>%
+  filter(!is.na(normalized_naini_cortina_score) | !is.na(normalized_riley_score))
+samples_with_scores_rna <- samples_all_unique_rna %>%
+  filter(!is.na(normalized_naini_cortina_score) | !is.na(normalized_riley_score))
+# Verify the number of patients
+cat("Number of patients with at least one score:", n_distinct(samples_with_scores$PATIENT), "\n")
+```
+
+Patients with Naini Cortina Score and Riley Score
+
+```{r}
+# Naini Cortina table
+cortina_table <- samples_with_scores %>%
+  filter(!is.na(normalized_naini_cortina_score)) %>%
+  select(PATIENT, subject_id, orig_id, date, tissue, disease, sex, normalized_naini_cortina_score)
+cortina_table_rna <- samples_with_scores_rna %>%
+  filter(!is.na(normalized_naini_cortina_score)) %>%
+  select(PATIENT, sample_id, subject_id, orig_id, date, tissue, disease, sex, normalized_naini_cortina_score)
+# Riley table
+riley_table <- samples_with_scores %>%
+  filter(!is.na(normalized_riley_score)) %>%
+  select(PATIENT, subject_id, orig_id, date, tissue, disease, sex, normalized_riley_score)
+riley_table_rna <- samples_with_scores_rna %>%
+  filter(!is.na(normalized_riley_score)) %>%
+  select(PATIENT, sample_id, subject_id, orig_id, date, tissue, disease, sex, normalized_riley_score)
+# Verify the number of patients in each table
+cat("Number of patients in Cortina table:", n_distinct(cortina_table$PATIENT), "\n")
+cat("Number of patients in Riley table:", n_distinct(riley_table$PATIENT), "\n")
+```
+
+Removing patients scored with the wrong scoring system
+
+```{r}
+# Remove UC patients from Naini Cortina table
+cortina_table_cleaned <- cortina_table %>%
+  filter(disease != "Ulcerative colitis")
+cortina_table_rna_cleaned <- cortina_table_rna %>%
+  filter(disease != "Ulcerative colitis")
+# Remove CD patients from Riley table
+riley_table_cleaned <- riley_table %>%
+  filter(disease != "Crohn's disease")
+riley_table_rna_cleaned <- riley_table_rna %>%
+  filter(disease != "Crohn's disease")
+# Verify the number of patients in each table after cleaning
+cat("Number of patients in Cortina table after cleaning:", n_distinct(cortina_table_cleaned$PATIENT), "\n")
+cat("Number of patients in Riley table after cleaning:", n_distinct(riley_table_cleaned$PATIENT), "\n")
+```
+
+Splitting the Naini Cortina and Riley table for Berlin and Erlangen cohorts
+
+```{r}
+# Split Cortina table into Berlin and Erlangen
+cortina_berlin <- cortina_table_cleaned %>%
+  filter(grepl("^TRR241-B-", orig_id)) %>%
+  select(-orig_id)  # Exclude orig_id
+cortina_berlin_rna <- cortina_table_rna_cleaned %>%
+  filter(grepl("^TRR241-B-", orig_id)) %>%
+  select(-orig_id)  # Exclude orig_id
+
+cortina_erlangen <- cortina_table_cleaned %>%
+  filter(grepl("^TRR241-E-", orig_id)) %>%
+  select(-orig_id)  # Exclude orig_id
+cortina_erlangen_rna <- cortina_table_rna_cleaned %>%
+  filter(grepl("^TRR241-E-", orig_id)) %>%
+  select(-orig_id)  # Exclude orig_id
+
+# Split Riley table into Berlin and Erlangen
+riley_berlin <- riley_table_cleaned %>%
+  filter(grepl("^TRR241-B-", orig_id)) %>%
+  select(-orig_id)  # Exclude orig_id
+riley_berlin_rna <- riley_table_rna_cleaned %>%
+  filter(grepl("^TRR241-B-", orig_id)) %>%
+  select(-orig_id)  # Exclude orig_id
+
+riley_erlangen <- riley_table_cleaned %>%
+  filter(grepl("^TRR241-E-", orig_id)) %>%
+  select(-orig_id)  # Exclude orig_id
+riley_erlangen_rna <- riley_table_rna_cleaned %>%
+  filter(grepl("^TRR241-E-", orig_id)) %>%
+  select(-orig_id)  # Exclude orig_id
+
+# Verify the number of patients in each table
+cat("Cortina Berlin entries:", nrow(cortina_berlin), "\n")
+cat("Cortina Erlangen entries:", nrow(cortina_erlangen), "\n")
+cat("Riley Berlin entries:", nrow(riley_berlin), "\n")
+cat("Riley Erlangen entries:", nrow(riley_erlangen), "\n")
+```
+
+Saving all the tables
+
+```{r}
+# Save Naini Cortina tables
+write.csv(cortina_table_cleaned, file.path(params$resultdir, "clini_table_cortina.csv"), row.names = FALSE, quote = FALSE)
+write.csv(cortina_berlin, file.path(params$resultdir, "clini_table_cortina_berlin.csv"), row.names = FALSE, quote = FALSE)
+write.csv(cortina_erlangen, file.path(params$resultdir, "clini_table_cortina_erlangen.csv"), row.names = FALSE, quote = FALSE)
+write.csv(cortina_table_rna_cleaned, file.path(params$resultdir, "clini_table_cortina_rna.csv"), row.names = FALSE, quote = FALSE)
+write.csv(cortina_berlin_rna, file.path(params$resultdir, "clini_table_cortina_berlin_rna.csv"), row.names = FALSE, quote = FALSE)
+write.csv(cortina_erlangen_rna, file.path(params$resultdir, "clini_table_cortina_erlangen_rna.csv"), row.names = FALSE, quote = FALSE)
+# Save Riley tables
+write.csv(riley_table_cleaned, file.path(params$resultdir, "clini_table_riley.csv"), row.names = FALSE, quote = FALSE)
+write.csv(riley_berlin, file.path(params$resultdir, "clini_table_riley_berlin.csv"), row.names = FALSE, quote = FALSE)
+write.csv(riley_erlangen, file.path(params$resultdir, "clini_table_riley_erlangen.csv"), row.names = FALSE, quote = FALSE)
+write.csv(riley_table_rna_cleaned, file.path(params$resultdir, "clini_table_riley_rna.csv"), row.names = FALSE, quote = FALSE)
+write.csv(riley_berlin_rna, file.path(params$resultdir, "clini_table_riley_berlin_rna.csv"), row.names = FALSE, quote = FALSE)
+write.csv(riley_erlangen_rna, file.path(params$resultdir, "clini_table_riley_erlangen_rna.csv"), row.names = FALSE, quote = FALSE)
+```

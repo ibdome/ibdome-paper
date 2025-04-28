@@ -1,0 +1,114 @@
+---
+title: "CytoSig plotting and downstream analyses"
+author: "chripla"
+date: "`r Sys.Date()`"
+output: html_document
+params:
+  database: "data/ibdome_v1.0.1.sqlite"
+  artifact_dir: "results"
+  de_results_dir: "results/DESeq2"
+  cyto_results_dir: "results/CytoSig"
+---
+
+
+Load libraries:
+```{r}
+box::use(
+   lib/colors[COLORS],
+   lib/db[db_connect],
+   readxl[read_xlsx],
+   dplyr[...],
+   tibble[column_to_rownames],
+   ComplexHeatmap[Heatmap, draw],
+   circlize[colorRamp2],
+   grid[gpar, unit, grid.text]
+)
+``` 
+
+Connect to the IBDome database:
+```{r}
+DB = db_connect(params$database)
+dir.create(params$artifact_dir, showWarnings = FALSE)
+``` 
+
+### Import CytoSig results
+
+```{r}
+cyto_res_CD_colon = read_xlsx(file.path(params$cyto_results_dir, "ibdome.xlsx"), sheet="CD_colon")
+cyto_res_CD_ileum = read_xlsx(file.path(params$cyto_results_dir, "ibdome.xlsx"), sheet="CD_ileum")
+cyto_res_UC_colon = read_xlsx(file.path(params$cyto_results_dir, "ibdome.xlsx"), sheet="UC_colon")
+``` 
+
+### Adjust p-value
+
+```{r}
+cyto_res_CD_colon$FDR <- p.adjust(cyto_res_CD_colon$Pvalue, method="BH")
+cyto_res_CD_ileum$FDR <- p.adjust(cyto_res_CD_ileum$Pvalue, method="BH")
+cyto_res_UC_colon$FDR <- p.adjust(cyto_res_UC_colon$Pvalue, method="BH")
+```
+
+### Plot heatmap
+
+Prepare dataframe:
+```{r}
+df_hm_cyto_orig = cyto_res_CD_colon |>
+  select(Signal, `CD colon` = Zscore, CD_colon_FDR = FDR) |>
+  left_join(cyto_res_CD_ileum |> select(Signal, `CD ileum` = Zscore, CD_ileum_FDR = FDR), by="Signal") |>
+  left_join(cyto_res_UC_colon |> select(Signal, `UC colon` = Zscore, UC_colon_FDR = FDR), by="Signal")
+
+# filter for those cytokines, which are at least in one condition significantly up or downregulated
+df_hm_cyto_orig_filtered = df_hm_cyto_orig |>
+  filter(CD_colon_FDR < 0.05 | CD_ileum_FDR < 0.05 | UC_colon_FDR < 0.05)
+
+# Store expression and p-values separately:
+df_score_cyto_orig = df_hm_cyto_orig_filtered |>
+  select(Signal, `CD colon`, `CD ileum`, `UC colon`) |>
+  column_to_rownames("Signal") |>
+  t()
+
+df_FDR_cyto_orig = df_hm_cyto_orig_filtered |>
+  select(Signal, CD_colon_FDR, CD_ileum_FDR, UC_colon_FDR) |>
+  column_to_rownames("Signal") |>
+  t()
+``` 
+
+Create plot:
+```{r, fig.width=17.5, fig.height=2}
+col_fun = colorRamp2(seq(-15, 15, length = 3), c("blue", "#EEEEEE", "red"))
+
+hm <- Heatmap(df_score_cyto_orig,
+        cluster_rows = FALSE,
+        cluster_columns = TRUE,
+        show_column_dend = FALSE,
+        width = unit(ncol(df_score_cyto_orig) * 10, "mm"),  # Adjust width for square cells
+        height = unit(nrow(df_score_cyto_orig) * 10, "mm"),  # Adjust height for square cells
+        name="z-score",
+        rect_gp = gpar(col = "white", lwd = 2),  # Add space between cells 
+        col=col_fun,
+        cell_fun = function(j, i, x, y, w, h, fill) {
+            # Check for significance and add stars
+          if (!is.na(df_FDR_cyto_orig[i, j])) {
+            if(df_FDR_cyto_orig[i, j] < 0.01) {
+              grid.text("***", x, y)
+            } else if(df_FDR_cyto_orig[i, j] < 0.05) {
+              grid.text("**", x, y)
+            } else if(df_FDR_cyto_orig[i, j] < 0.1) {
+              grid.text("*", x, y)
+        }
+      }
+    }
+)
+
+# Save to file:
+pdf(file=file.path(params$artifact_dir, "Figure3e.pdf"), width=17.5, height=2)
+draw(hm)
+dev.off()
+
+draw(hm)
+``` 
+
+### Session info
+
+```{r}
+sessionInfo()
+``` 

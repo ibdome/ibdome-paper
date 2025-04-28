@@ -1,0 +1,540 @@
+---
+title: "Downstream analyses of the differential expression results"
+author: "chripla"
+date: "`r Sys.Date()`"
+params:
+  database: "data/ibdome_v1.0.1.sqlite"
+  artifact_dir: "results"
+  de_results_dir: "results/DESeq2"
+  cyto_dir: "results/CytoSig"
+---
+
+Load libraries:
+```{r}
+box::use(
+   lib/colors[COLORS],
+   lib/db[db_connect],
+   readr[read_tsv, read_csv, write_tsv, write_csv],
+   dplyr[...],
+   ggvenn[ggvenn],
+   ggplot2[...],
+   patchwork[...],
+   stringr[str_replace],
+   clusterProfiler[enrichGO, setReadable, ridgeplot],
+   org.Hs.eg.db[org.Hs.eg.db],
+   cowplot[theme_cowplot, background_grid],
+   tibble[column_to_rownames, rownames_to_column],
+   tidyr[pivot_wider],
+   ComplexHeatmap[Heatmap, HeatmapAnnotation, anno_empty, draw],
+   grid[gpar],
+   ggbeeswarm[geom_quasirandom],
+   ggsignif[geom_signif],
+)
+set.seed(123)
+``` 
+
+Connect to the IBDome database:
+```{r}
+DB = db_connect(params$database)
+dir.create(params$artifact_dir, showWarnings = FALSE)
+dir.create(params$cyto_dir, showWarnings = FALSE)
+``` 
+
+### Get DESeq2 output files
+
+For simplicity we use the abbreviation CD colon, CD ileum, and UC colon for the comparisons between the inflamed samples versus non-IBD controls:
+```{r}
+CD_colon_sig <- read_tsv(file.path(params$de_results_dir, "CD_inflamed_colon_vs_nonIBD_colon/CD_inflamed_colon_nonIBD_colon_IHWsigFCgenes_2_fold.tsv"))
+CD_ileum_sig <- read_tsv(file.path(params$de_results_dir, "CD_inflamed_ileum_vs_nonIBD_ileum/CD_inflamed_ileum_nonIBD_ileum_IHWsigFCgenes_2_fold.tsv"))
+UC_colon_sig <- read_tsv(file.path(params$de_results_dir, "UC_inflamed_colon_vs_nonIBD_colon/UC_inflamed_colon_nonIBD_colon_IHWsigFCgenes_2_fold.tsv"))
+``` 
+
+## Plot overlap of up- and downregulated genes in the different conditions
+
+### Create gene lists with information about the regulation direction 
+
+```{r}
+CD_colon = CD_colon_sig |>
+  mutate(gene_id = ifelse(log2FoldChange > 0, paste0(gene_id, "_up"), paste0(gene_id, "_down"))) |>
+  pull(gene_id) |>
+  na.omit() |>
+  unique()
+
+CD_ileum = CD_ileum_sig |>
+  mutate(gene_id = ifelse(log2FoldChange > 0, paste0(gene_id, "_up"), paste0(gene_id, "_down"))) |>
+  pull(gene_id) |>
+  na.omit() |>
+  unique()
+
+UC_colon = UC_colon_sig |>
+  mutate(gene_id = ifelse(log2FoldChange > 0, paste0(gene_id, "_up"), paste0(gene_id, "_down"))) |>
+  pull(gene_id) |>
+  na.omit() |>
+  unique()
+``` 
+
+### Overall overlap
+
+```{r, fig.height=6, fig.width=5}
+genelists <- list("CD colon" = CD_colon, 
+                  "CD ileum" = CD_ileum,
+                  "UC colon" = UC_colon)
+
+ggvenn(genelists, fill_color=unname(COLORS$group_tissue), show_percentage = FALSE, text_size=7)
+ggsave(file.path(params$artifact_dir, "Figure3b.pdf"), width = 5, height = 6)
+``` 
+
+
+### Overlap of up and downregulated DE genes
+
+Prepare lists:
+```{r}
+CD_colon_up <- CD_colon[grepl("_up$", CD_colon)]
+CD_ileum_up <- CD_ileum[grepl("_up$", CD_ileum)]
+UC_colon_up <- UC_colon[grepl("_up$", UC_colon)]
+
+CD_colon_down <- CD_colon[grepl("_down$", CD_colon)]
+CD_ileum_down <- CD_ileum[grepl("_down$", CD_ileum)]
+UC_colon_down <- UC_colon[grepl("_down$", UC_colon)]
+``` 
+
+```{r, fig.height=6, fig.width=10}
+genelists_up <- list("CD colon up" = CD_colon_up,
+                  "CD ileum up" = CD_ileum_up,
+                  "UC colon up" = UC_colon_up)
+
+genelists_down <- list("CD colon down" = CD_colon_down,
+                  "CD ileum down" = CD_ileum_down,
+                  "UC colon down" = UC_colon_down)
+
+v1 <- ggvenn(genelists_up, fill_color=unname(COLORS$group_tissue), show_percentage = FALSE, text_size=7)
+v2 <- ggvenn(genelists_down, fill_color=unname(COLORS$group_tissue), show_percentage = FALSE, text_size=7)
+
+(v1 | v2)
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure3b.pdf"), width = 10, height = 6)
+``` 
+
+## Enrichment analysis of commonly up- and downregulated genes
+
+* database: GO-BP
+* method: over-representation analysis
+
+Get intersection of upregulated genes across all conditions:
+```{r}
+common_up <- str_replace(intersect(CD_colon_up, intersect(CD_ileum_up, UC_colon_up)), "_up", "")
+common_down <- str_replace(intersect(CD_colon_down, intersect(CD_ileum_down, UC_colon_down)), "_down", "")
+``` 
+
+Create universe gene list:
+```{r}
+CD_colon_DE <- read_tsv(file.path(params$de_results_dir, "CD_inflamed_colon_vs_nonIBD_colon/CD_inflamed_colon_nonIBD_colon_IHWallGenes.tsv")) 
+CD_ileum_DE <- read_tsv(file.path(params$de_results_dir, "CD_inflamed_ileum_vs_nonIBD_ileum/CD_inflamed_ileum_nonIBD_ileum_IHWallGenes.tsv"))
+UC_colon_DE <- read_tsv(file.path(params$de_results_dir, "UC_inflamed_colon_vs_nonIBD_colon/UC_inflamed_colon_nonIBD_colon_IHWallGenes.tsv"))
+
+universe_UC_colon <- UC_colon_DE |>
+  pull(gene_id) |>
+  na.omit() |>
+  unique()
+
+universe_CD_ileum <- CD_ileum_DE |>
+  pull(gene_id) |>
+  na.omit() |>
+  unique()
+
+universe_CD_colon <- CD_colon_DE |>
+  pull(gene_id) |>
+  na.omit() |>
+  unique()
+
+universe_all = c(universe_CD_colon, universe_CD_ileum, universe_UC_colon) |>  unique()
+``` 
+
+### Run ORA GO-BP of commonly upregulated genes
+
+```{r}
+go_res_common_up = enrichGO(gene = common_up,
+                              universe = universe_all,
+                              keyType = "ENSEMBL",
+                              OrgDb = "org.Hs.eg.db",
+                              ont = "BP",
+                              pAdjustMethod = "BH",
+                              qvalueCutoff = 0.05,
+                              minGSSize = 10)
+
+go_res_common_up = setReadable(go_res_common_up, OrgDb = "org.Hs.eg.db", keyType="ENSEMBL")
+go_res_common_up_tab = as_tibble(go_res_common_up@result)
+write_tsv(go_res_common_up_tab, file.path(params$artifact_dir, "ORA_GOBP_common_up_unique.tsv"))
+``` 
+
+### Plot pathways of interest
+
+```{r}
+poi = c("acute inflammatory response", 
+        "immunoglobulin mediated immune response",
+        "antimicrobial humoral response",
+        "granulocyte migration",
+        "chemokine production",
+        "cytokine production involved in immune response",
+        "T cell activation involved in immune response")
+
+poi_common_up <- go_res_common_up |> filter(Description %in% poi)
+``` 
+
+```{r, fig.height=5, fig.width=6}
+mutate(poi_common_up, qscore = -log(p.adjust, base=10)) |>
+  barplot(x="qscore") +
+  theme_cowplot()
+
+ggsave(file.path(params$artifact_dir, "Figure3c.pdf"), height = 5, width = 6)
+``` 
+
+### Run ORA GO-BP of commonly downregulated genes
+
+```{r}
+go_res_common_down= enrichGO(gene = common_down,
+                              universe = universe_all,
+                              keyType = "ENSEMBL",
+                              OrgDb = "org.Hs.eg.db",
+                              ont = "BP",
+                              pAdjustMethod = "BH",
+                              qvalueCutoff = 0.05,
+                              minGSSize = 10)
+
+go_res_common_down = setReadable(go_res_common_down, OrgDb = "org.Hs.eg.db", keyType="ENSEMBL")
+go_res_common_down_tab = as_tibble(go_res_common_down@result)
+write_tsv(go_res_common_down_tab, file.path(params$artifact_dir, "ORA_GOBP_common_down_unique.tsv"))
+``` 
+
+### Plot heatmap of commonly downregulated genes
+
+
+Get RNA-seq meta from DESeq results folder:
+```{r}
+rnaseq_metadata = read_csv(file.path(params$de_results_dir, "meta_data_rnaseq.csv"))
+``` 
+
+Add groups for plotting to metadata:
+```{r}
+rnaseq_metadata = rnaseq_metadata |> 
+  mutate(group = if_else(inflammation_status == "inflamed", "IBD_inflamed", "IBD_non_inflamed")) |>
+  mutate(group = if_else(disease=="non-IBD", "non-IBD",group)) |>
+  filter(! is.na(group))
+``` 
+
+Add histopathology and endoscopic scores:
+```{r}
+histo = tbl(DB, "samples") |> inner_join(tbl(DB, "data_histopathology2"), by="sample_id") |> inner_join(tbl(DB, "tissues"), by="tissue") |> collect()
+
+histo_scores = histo |>
+  group_by(subject_id, date, tissue_coarse) |> 
+  summarise_at(vars(modified_naini_cortina_score, modified_riley_score, normalized_naini_cortina_score, normalized_riley_score), \(x) mean(x, na.rm=TRUE)) |>
+  mutate(date = as.Date(date))
+
+endoscopy = tbl(DB, "samples") |> inner_join(tbl(DB, "data_endoscopy"), by = "sample_id") |> collect()
+
+endo_scores = endoscopy |>
+  group_by(subject_id, date) |> 
+  summarise_at(vars(SES_CD, UCEIS), \(x) mean(x, na.rm=TRUE)) |> 
+  mutate(date = as.Date(date))
+
+rnaseq_metadata = rnaseq_metadata |>
+  mutate(date = as.Date(date)) |>
+  left_join(endo_scores) |>
+  left_join(histo_scores)
+``` 
+
+Create TPM table from database:
+```{r}
+rnaseq_data = tbl(DB, "samples_subjects_tissues") |>
+  inner_join(tbl(DB, "data_rnaseq"), by="sample_id") |> 
+  inner_join(tbl(DB, "genes"), by=c("gene_id"="ensg")) |>
+  filter(sample_id %in% rnaseq_metadata$sample_id) |>
+  select(subject_id, sample_id, tissue_coarse, date, gene_id, hgnc_symbol, tpm, raw_counts) |> collect() |> mutate(log_tpm = log10(tpm + 1))
+
+tpm_data_goi = rnaseq_data |>
+  filter(gene_id %in% common_down) |>
+  mutate(hgnc_symbol = ifelse(is.na(hgnc_symbol), gene_id, hgnc_symbol)) |>
+  pivot_wider(id_cols = "hgnc_symbol", names_from="sample_id", values_from="log_tpm")  |>
+  column_to_rownames("hgnc_symbol") 
+```
+
+
+Order according to annotation table:
+```{r}
+tpm_data_goi = tpm_data_goi[, rnaseq_metadata$sample_id]
+
+#scale
+tpm_data_goi_scaled =t(scale(t(tpm_data_goi[!apply(tpm_data_goi, 1, function(row) {all(row == 0)}),])))
+
+# Heatmap annotations:
+ha = HeatmapAnnotation(
+    group = rnaseq_metadata$group,
+    disease = rnaseq_metadata$disease,
+    sex=rnaseq_metadata$sex,
+    tissue_coarse = rnaseq_metadata$tissue_coarse,
+    blank2 = anno_empty(border=FALSE, height=unit(3, "mm")),
+    SES_CD = rnaseq_metadata$SES_CD,
+    UCEIS = rnaseq_metadata$UCEIS,
+    blank4 = anno_empty(border=FALSE, height=unit(3, "mm")),
+    normalized_naini_cortina=rnaseq_metadata$normalized_naini_cortina_score,
+    normalized_riley=rnaseq_metadata$normalized_riley_score,
+    col=list(
+      group=COLORS$group,
+      disease=COLORS$disease,
+      sex=COLORS$sex,
+      tissue_coarse = COLORS$tissue,
+      SES_CD=circlize::colorRamp2(seq(0, 60, 1), viridisLite::viridis(61)),
+      UCEIS=circlize::colorRamp2(seq(0, 8, 0.25), viridisLite::inferno(33)),
+      normalized_naini_cortina=circlize::colorRamp2(seq(0, 1, 0.01), viridisLite::viridis(101)),
+      normalized_riley=circlize::colorRamp2(seq(0, 1, 0.01), viridisLite::inferno(101))
+    ),
+   annotation_legend_param = list(
+     title_gp = gpar(fontsize = 14, fontface = "bold"), # Title text size
+     labels_gp = gpar(fontsize = 12), # Labels text size for annotation legends
+     legend_height = unit(2.5, "cm"), # Increase height of annotation legend
+     legend_width = unit(2.5, "cm")   # Increase width of annotation legend
+     )
+)
+``` 
+
+Plot heatmap:
+```{r, fig.width=20, fig.height=10}
+# group order
+rnaseq_metadata$group <- factor(rnaseq_metadata$group, levels = c('IBD_inflamed', 'IBD_non_inflamed', 'non-IBD'))
+
+hm <- Heatmap(tpm_data_goi_scaled,
+              column_split = rnaseq_metadata$group,
+              column_title=c("IBD inflamed", "IBD non-inflamed", "non-IBD"),
+              column_title_gp = gpar(fontsize=16),
+              top_annotation = ha,
+              show_row_names = TRUE,
+              show_row_dend = FALSE,
+              show_column_names = FALSE,
+              show_column_dend = FALSE,
+              cluster_column_slices = FALSE,
+              name="z-score",
+              row_names_gp = gpar(fontface = "italic"),
+              heatmap_legend_param = list(legend_height = unit(2.5, "cm"), # Increase the height
+                                          legend_width = unit(2.5, "cm"),  # Increase the width
+                                          title_gp = gpar(fontsize = 14, fontface = "bold"), # Title text size
+                                          labels_gp = gpar(fontsize = 12) # Labels text size
+              ))
+
+# Save to file:
+pdf(file=file.path(params$artifact_dir, "ExtendedDataFigure3c.pdf"), width=20, height=10)
+draw(hm,
+     heatmap_legend_side = "bottom",
+     annotation_legend_side = "bottom",
+     merge_legend=TRUE)
+dev.off()
+
+draw(hm,
+     heatmap_legend_side = "bottom",
+     annotation_legend_side = "bottom",
+     merge_legend=TRUE)
+```
+
+
+## Run CytoSig for the different comparisons
+
+### Prepare input matrix for CytoSig
+
+```{r}
+CD_colon_cyto <- CD_colon_DE |>
+  select(gene_name, stat) |>
+  filter(!is.na(stat)) |>
+  group_by(gene_name)|>
+  summarize(stat = mean(stat)) |>
+  ungroup() |>
+  filter(!is.na(gene_name)) |>
+  column_to_rownames("gene_name") |>
+  as.matrix()
+
+CD_ileum_cyto <- CD_ileum_DE |>
+  select(gene_name, stat) |>
+  filter(!is.na(stat)) |>
+  group_by(gene_name)|>
+  summarize(stat = mean(stat)) |>
+  ungroup() |>
+  filter(!is.na(gene_name)) |>
+  column_to_rownames("gene_name") |>
+  as.matrix()
+
+UC_colon_cyto <- UC_colon_DE |>
+  select(gene_name, stat) |>
+  filter(!is.na(stat)) |>
+  group_by(gene_name)|>
+  summarize(stat = mean(stat)) |>
+  ungroup() |>
+  filter(!is.na(gene_name)) |>
+  column_to_rownames("gene_name") |>
+  as.matrix()
+
+cyto_mat = CD_colon_cyto |>
+  as.data.frame() |>
+  rename("CD_colon" = "stat") |> 
+  rownames_to_column("gene_name") |>
+  left_join(CD_ileum_cyto |> as.data.frame() |> rownames_to_column("gene_name") |> select(gene_name, CD_ileum = stat), by="gene_name") |>
+  left_join(UC_colon_cyto |> as.data.frame() |> rownames_to_column("gene_name") |> select(gene_name, UC_colon = stat), by="gene_name")
+
+write_csv(cyto_mat, file=file.path(params$cyto_dir, "cyto_mat.csv"))
+```
+
+
+## Plot IL-12 pathway genes
+
+### Plot genes of interest with DESeq2 statistic
+
+```{r}
+goi_IL12<- c("IL12A", "IL12B", "IL12RB1", "IL12RB2", "IL23A", "JAK1", "JAK2", "STAT4")
+
+tpm_goi_box = rnaseq_data |> 
+  filter(hgnc_symbol %in% goi_IL12) |>
+  select(sample_id, hgnc_symbol, log_tpm) |>
+  left_join(rnaseq_metadata) |>
+  filter(group_tissue %in% c("CD_inflamed_colon", "CD_inflamed_ileum", "UC_inflamed_colon", "nonIBD_colon", "nonIBD_ileum")) |>
+  mutate(group_tissue = str_replace(group_tissue, "_inflamed", ""))
+``` 
+
+```{r, fig.height=5.5, fig.width=9}
+p_IL12 <- ggplot(tpm_goi_box, aes(x = group_tissue, y = log_tpm)) +
+  geom_quasirandom(aes(color = group_tissue)) +
+  facet_wrap(~ hgnc_symbol, ncol = 4) +
+  theme_cowplot() +
+  background_grid() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(size = 13, face = "italic"),
+    legend.title = element_text(face="bold")
+  ) +
+  scale_color_manual(values = COLORS$group_tissue, name="group") +
+  ylim(0, 3.3) +
+  labs(x = "", y = "log10(TPM+1)") +
+  geom_signif(
+    data =  data.frame(
+    hgnc_symbol = c("IL12A", "IL12B", "IL12RB2", "IL12RB2", "IL23A", # significant
+                    "IL12A", "IL12A", "IL12B", "IL12B", rep("IL12RB1",3), "IL12RB2", rep("IL23A", 2), rep("JAK1",3), rep("JAK2",3), rep("STAT4", 3)), # non-significant
+    xmin = c("CD_colon",  "CD_colon", "CD_ileum", "CD_colon", "UC_colon", # significant
+             "UC_colon", "CD_ileum", "CD_ileum", "UC_colon", "CD_colon", "CD_ileum", "UC_colon", "UC_colon", "CD_colon", "CD_ileum", "CD_colon", "CD_ileum", "UC_colon", "CD_colon", "CD_ileum", "UC_colon", "CD_colon", "CD_ileum", "UC_colon"),
+    xmax = c("nonIBD_colon","nonIBD_colon", "nonIBD_ileum", "nonIBD_colon", "nonIBD_colon", # significant
+             "nonIBD_colon", "nonIBD_ileum", "nonIBD_ileum", "nonIBD_colon", "nonIBD_colon", # non-significant
+             "nonIBD_ileum", "nonIBD_colon", "nonIBD_colon", "nonIBD_colon", "nonIBD_ileum", "nonIBD_colon", "nonIBD_ileum", "nonIBD_colon", "nonIBD_colon", "nonIBD_ileum", "nonIBD_colon", "nonIBD_colon", "nonIBD_ileum", "nonIBD_colon"),
+    annotations = c(rep("padj < 0.05", 5), rep("ns", 19)),
+    y_position = c(3, 3, 2.5, 3, 2, # significant
+                   2, 2.5, 2.5, 2, 3, 2.5, 2, 2, 3, 2.5, 3, 2.5, 2, 3, 2.5, 2, 3, 2.5, 2)  # non-significant
+  ), 
+    aes(
+      xmin = xmin, 
+      xmax = xmax, 
+      annotations = annotations, 
+      y_position = y_position
+    ),
+    manual = TRUE,
+    inherit.aes = FALSE
+  ) +
+   # Add boxplot
+  geom_boxplot(aes(group = group_tissue), 
+               width = 0.5, 
+               color = "black", 
+               fill = "gray", 
+               alpha = 0.3)  
+p_IL12
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure3d.pdf"), height = 5.5, width = 9)
+``` 
+
+## Plot MUCINS
+
+```{r}
+goi_mucins<- c("MUC2", "MUC6", "MUC16", "MUC17", "MUC5B", "MUC4", "MUC20", "MUCL3")
+
+tpm_goi_mucins = rnaseq_data |> 
+  filter(hgnc_symbol %in% goi_mucins) |>
+  select(sample_id, hgnc_symbol, log_tpm) |>
+  left_join(rnaseq_metadata) |>
+  filter(group_tissue %in% c("CD_inflamed_colon", "CD_inflamed_ileum", "UC_inflamed_colon", "nonIBD_colon", "nonIBD_ileum")) |>
+  mutate(group_tissue = str_replace(group_tissue, "_inflamed", ""))
+``` 
+
+```{r, fig.height=5.5, fig.width=14}
+# define order:
+tpm_goi_mucins <- tpm_goi_mucins %>%
+  mutate(hgnc_symbol = factor(hgnc_symbol, levels = c("MUC2", "MUC17", "MUC6", "MUC16",  "MUC4", "MUC5B", "MUC20", "MUCL3")))
+
+annotations_data <- data.frame(
+  hgnc_symbol = c("MUC2", "MUC17", "MUC6", "MUC16",  "MUC4", "MUC5B", "MUC20", "MUCL3", # significant
+                  rep("MUC2", 2), rep("MUC17",2), rep("MUC6", 2), rep("MUC16",2), rep("MUC4",2), rep("MUC5B",2), rep("MUC20",2), rep("MUCL3",2)),
+  xmin = c("CD_colon", rep("UC_colon",3), rep("CD_ileum", 4), # significant
+           "CD_ileum", "UC_colon", "CD_colon", "CD_ileum", "CD_colon", "CD_ileum", "CD_colon", "CD_ileum", "CD_colon", "UC_colon", "CD_colon", "UC_colon", "CD_colon", "UC_colon", "CD_colon", "UC_colon"),
+  xmax = c(rep("nonIBD_colon", 4), rep("nonIBD_ileum", 4), # significant
+           "nonIBD_ileum", "nonIBD_colon", "nonIBD_colon", "nonIBD_ileum", "nonIBD_colon", "nonIBD_ileum", "nonIBD_colon", "nonIBD_ileum" ,rep("nonIBD_colon",8)),
+  annotations = c(rep("padj < 0.05",8), rep("ns",16)),
+  y_position = c(4.5, rep(3.5,3), rep(4, 4), 4, 3.5, 4.5, 4, 4.5, 4, 4.5, 4, 4.5, 3.5,  4.5, 3.5,  4.5, 3.5,  4.5, 3.5)
+) %>%
+  mutate(
+    hgnc_symbol = factor(hgnc_symbol, levels = c("MUC2", "MUC6", "MUC16", "MUC17", "MUC4", "MUC5B", "MUC20", "MUCL3"))
+  )
+
+# Main plot
+p <- ggplot(tpm_goi_mucins, aes(x = group_tissue, y = log_tpm)) +
+  geom_quasirandom(aes(color = group_tissue)) +
+  facet_wrap(~ hgnc_symbol, ncol = 4) +
+  theme_cowplot() +
+  background_grid() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(size = 13, face = "italic"),
+    legend.position = "none" # Temporarily remove the legend
+  ) +
+  scale_color_manual(values = COLORS$group_tissue) +
+  ylim(0, 4.8) +
+  labs(x = "", y = "log10(TPM+1)") +
+  geom_signif(
+    data = annotations_data,
+    aes(
+      xmin = xmin, 
+      xmax = xmax, 
+      annotations = annotations, 
+      y_position = y_position
+    ),
+    manual = TRUE,
+    inherit.aes = FALSE
+  )+
+   # Add boxplot
+  geom_boxplot(aes(group = group_tissue), 
+               width = 0.5, 
+               color = "black", 
+               fill = "gray", 
+               alpha = 0.3) 
+
+# Vertical labels for rows with grey box
+row_labels <- ggplot() +
+  geom_rect(aes(xmin = 0.7, xmax = 1.3, ymin = 0, ymax = 2), fill = "grey90", color = "grey70") + # Grey box
+  annotate("text", x = 1, y = 1.5, label = "colon", angle = 90, size = 5, fontface = "bold") +
+  annotate("text", x = 1, y = 0.5, label = "ileum", angle = 90, size = 5, fontface = "bold") +
+  theme_void() +
+  xlim(0.5, 1.5) +
+  ylim(0, 2)
+
+# Legend as a separate plot
+legend <- cowplot::get_legend(
+  ggplot(tpm_goi_mucins, aes(x = group_tissue, y = log_tpm, color = group_tissue)) +
+    geom_point() +
+    scale_color_manual(values = COLORS$group_tissue, name = "group") +
+    theme_cowplot() +
+    theme(legend.position = "right",
+          legend.title = element_text(face="bold"))
+)
+
+# Combine the main plot, row labels, and legend
+p <- (p + row_labels + plot_layout(widths = c(1, 0.1))) |
+  legend
+
+p
+ggsave(file.path(params$artifact_dir, "Figure3d.pdf"), height = 5.5, width = 14)
+``` 
+
+### Session info
+
+```{r}
+sessionInfo()
+``` 

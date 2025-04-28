@@ -1,0 +1,10 @@
+/results
+/data
+*html
+*checkpoint.ipynb
+*.nextflow.log*
+/work
+.nextflow*
+/external_tools/*
+gencode.v33.primary_assembly.annotation.gtf.gz
+.ipynb_checkpoints/
