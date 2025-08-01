@@ -15,9 +15,6 @@ Mandatory options:
   --c2=<c2>                     Contrast level 2 (baseline). Needs to be contained in condition_col.
 
 Optional options:
-  --nfcore                      Indicate that the input samplesheet is from the nf-core RNA-seq ppipeline.
-                                Will merge entries from the same sample and infer the sample_id from `group` and `replicate`.
-                                If set, this option overrides `sample_col`.
   --condition_col=<cond_col>    Column in sample annotation that contains the condition [default: group]
   --sample_col=<sample_col>     Column in sample annotation that contains the sample names
                                 (needs to match the colnames of the count table). [default: sample]
@@ -56,9 +53,6 @@ library("DESeq2")
 library("IHW")
 library("ggplot2")
 library("pcaExplorer")
-#library("topGO")
-#library("clusterProfiler")
-#library("ReactomePA")
 library("writexl")
 library("readr")
 library("dplyr")
@@ -88,7 +82,6 @@ prefix <- arguments$prefix
 plot_title <- arguments$plot_title
 
 # Sample information and contrasts
-nfcore = arguments$nfcore
 cond_col = arguments$condition_col
 sample_col = arguments$sample_col
 contrast = c(cond_col, arguments$c1, arguments$c2)
@@ -152,17 +145,6 @@ if (length(base::setdiff(allSampleAnno[[cond_col]], contrast[2:3])) > 0) {
 
 
 # Add sample col based on condition and replicate if sample col is not explicitly specified
-# and make samplesheet distinct (in case the 'merge replicates' functionality was used).
-if(nfcore) {
-  sample_col = "sample"
-  sampleAnno = sampleAnno %>%
-    select(-fastq_1, -fastq_2) %>%
-    distinct()
-  allSampleAnno = allSampleAnno %>%
-    select(-fastq_1, -fastq_2) %>%
-    distinct()
-}
-
 if (is.null(covariate_formula)) {
   covariate_formula = ""
 }
@@ -260,9 +242,6 @@ p <- ggplot(gene_count, aes(sample, genes, fill=group)) +
 
 save_plot(file.path(results_dir, paste0(prefix, "_number_of_detected_genes")), p, width=10, height=7)
 write_tsv(gene_count, file.path(results_dir, paste0(prefix, "_number_of_detected_genes.tsv")))
-
-## keep only genes where we have >= 10 reads in total
-# keep <- rowSums(counts(dds)) >= 10
 
 ## keep only genes where we have >= 10 reads per samplecondition in total
 keep <- rowSums(counts(collapseReplicates(dds, dds[[cond_col]]))) >= 10
@@ -429,6 +408,9 @@ p <- EnhancedVolcano(resIHW,
                 lab = resIHW$gene_name,
                 x = "log2FoldChange",
                 y = "padj",
+                drawConnectors = TRUE,
+                labSize=6,
+                max.overlaps=15,
                 pCutoff = fdr_cutoff,
                 FCcutoff = fc_cutoff,
                 subtitle = "",
