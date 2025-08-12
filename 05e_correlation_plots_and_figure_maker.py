@@ -412,12 +412,12 @@ plt.savefig(out_file, dpi=300, bbox_inches='tight')
 ## Foundation Models Performance
 
 r_values = np.array([
-    [0.745, 0.801, 0.792, 0.784],  # Original score row
-    [0.903, 0.929, 0.933, 0.927]   # Predicted score row
+    [0.745, 0.801, 0.792, 0.787],  # Original score row
+    [0.903, 0.929, 0.933, 0.928]   # Predicted score row
 ])
 
 row_labels = ['normalized modified\n Naini-Cortina Score', 'normalized modified\n Riley Score']
-column_labels = ['CHIEF', 'UNI2', 'Virchow2', 'H-optimus-0']
+column_labels = ['CHIEF', 'UNI2', 'Virchow2', 'H-optimus-1']
 
 df = pd.DataFrame(r_values, index=row_labels, columns=column_labels)
 
