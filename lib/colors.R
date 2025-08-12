@@ -10,15 +10,17 @@ COLORS <- list(
         "NA" = NA_COLOR
     ),
     tissue = c(
-        "colon" = "#E69F00",
-        "ileum" = "#56B4E9",
-        "small intestine" = "#009E73",
-        "caecum" = "#F0E442",
-        "ileocecal valve" = "#0072B2",
-        "rectum" = "#D55E00",
-        "whole blood" = "#CC79A7",
-        "anastomosis" = "#B3DE68",
-        "NA" = NA_COLOR
+      "colon" = "#E69F00",
+      "ileum" = "#56B4E9",
+      "small intestine" = "#009E73",
+      "caecum" = "#F0E442",
+      "ileocecal valve" = "#0072B2",
+      "rectum" = "#D55E00",
+      "whole blood" = "#CC79A7",
+      "anastomosis" = "#B3DE68",
+      "pouch" = "#7570B3",
+      "other" = "darkgrey",
+      "NA" = NA_COLOR
     ),
     tissue_coarse = c(
       "colon" = "#E69F00",

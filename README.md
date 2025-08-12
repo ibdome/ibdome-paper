@@ -33,7 +33,7 @@ wget https://ibdome.org/static/ibdome_v1.0.1.zip
 
 ### Download the imaging data
 
-You might need to install `ncftp` in order to perform recusive FTP downloads.
+You might need to install `ncftp` in order to perform recursive FTP downloads.
 
 e.g.
 
@@ -85,6 +85,14 @@ python setup.py install
 python -m unittest tests.prediction
 conda deactivate
 cd ..
+```
+
+### MOFA2 setup
+
+Create a conda environment for the Python version of MOFA2 (mofapy2):
+
+```bash
+conda create -n MOFA_env python=3.13.3 pip -y && conda run -n MOFA_env pip install mofapy2==0.7.2
 ```
 
 ### WSI Embeddings extraction setup
