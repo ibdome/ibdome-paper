@@ -16,7 +16,7 @@ box::use(
    readr[write_tsv, write_csv, read_tsv, read_csv],
    dplyr[...],
    tibble[column_to_rownames, rownames_to_column],
-   tidyr[pivot_wider],
+   tidyr[pivot_wider, pivot_longer, drop_na],
    cowplot[theme_cowplot, background_grid],
    ggbeeswarm[geom_quasirandom],
    ggpubr[stat_cor],
@@ -31,7 +31,9 @@ box::use(
    ensembldb[transcripts, exonsBy],
    DESeq2[DESeqDataSetFromMatrix, estimateSizeFactors, counts, collapseReplicates, DESeq, results, summary, lfcShrink],
    IHW[ihw],
-   S4Vectors[...]
+   S4Vectors[...],
+   quantiseqr[run_quantiseq, quantiplot],
+   ggpubr[stat_compare_means]
 )
 
 options(warn=-1)
@@ -489,7 +491,7 @@ lolliplot(mutation_gr,  # GRanges object with mutations
           ylab="NOD2",
           rescale = TRUE)
 
-ggsave(file.path(params$artifact_dir, "Figure1d.pdf"), width = 15, height = 5)
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1f.pdf"), width = 15, height = 5)
 ``` 
 
 ## DE analysis comparing IBD inflamed vs non-IBD samples
@@ -623,11 +625,17 @@ rnaseq_metadata = rnaseq_metadata |>
   left_join(histo_scores)
 ```
 
+Get RNA-seq data:
+```{r}
+rnaseq_data = tbl(DB, "samples_subjects_tissues") |>
+  inner_join(tbl(DB, "data_rnaseq"), by="sample_id") |> 
+  inner_join(tbl(DB, "genes"), by=c("gene_id"="ensg")) |>
+  select(subject_id, sample_id, tissue_coarse, date, gene_id, hgnc_symbol, tpm, raw_counts) |> collect() 
+``` 
 
 Plot heatmap:
 ```{r}
-tpm_IBDome_goi = tbl(DB, "data_rnaseq") |>
-  left_join(tbl(DB, "genes"), by=c("gene_id" = "ensg")) |>
+tpm_IBDome_goi = rnaseq_data |>
   filter(hgnc_symbol %in% DE_immune) |>
   mutate(log_tpm = log10(tpm + 1)) |>
   collect() |>
@@ -731,6 +739,80 @@ draw(hm_IBDome,
 dev.off()
 ```
 
+## Deconvolution with quanTIseq
+
+### Prepare TPM matrix
+
+```{r}
+tpm_mat = rnaseq_data |>
+  pivot_wider(id_cols=c("gene_id", "hgnc_symbol"), names_from="sample_id", values_from="tpm") |>
+  group_by(hgnc_symbol) |>
+  summarise(across(starts_with("ibdome"), mean, na.rm = TRUE)) |>
+  drop_na() |>
+  column_to_rownames('hgnc_symbol')
+``` 
+
+### Run quanTIseq
+
+```{r}
+ti_racle <- quantiseqr::run_quantiseq(
+  expression_data = tpm_mat,
+  signature_matrix = "TIL10",
+  is_arraydata = FALSE,
+  is_tumordata = FALSE,
+  scale_mRNA = TRUE
+)
+``` 
+
+```{r, fig.height=50, fig.width=10}
+quantiplot(ti_racle)
+``` 
+
+### Combine with metadata
+
+```{r}
+DCdata_long_inflammation <- ti_racle |> 
+  select(- c('Other', 'Dendritic.cells', 'Monocytes')) |>
+  pivot_longer(cols=!Sample, names_to='celltype', values_to='fraction')|>
+  dplyr::rename("sample_id" = "Sample") |>
+  left_join(rnaseq_metadata |> select('sample_id', 'group', 'tissue_coarse'))
+``` 
+
+```{r, fig.height=6, fig.width=19}
+# Filter out NA values and keep only colon/ileum samples:
+DC_filtered <- DCdata_long_inflammation |>
+  filter(!is.na(group)) |>
+  filter(tissue_coarse %in% c("ileum", "colon"))
+
+# Create the box plot with adjusted facet spacing
+ggplot(DC_filtered, aes(x = group, y = fraction, fill = group)) +
+  geom_boxplot() +
+  facet_grid(tissue_coarse ~ celltype) +
+  theme_cowplot() + background_grid() +
+  xlab("")+
+  ylab("cell fraction")+
+  theme(
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 16),
+    legend.text = element_text(size = 16),
+    legend.title = element_blank(),
+    axis.text.x = element_blank(),
+    strip.text = element_text(size = 16),  # Adjust facet label text size
+    legend.position = "bottom"
+  ) +
+  scale_fill_manual(values = COLORS$group) +  
+  stat_compare_means(
+    aes(group=group),
+    method = "wilcox",
+    comparisons = list(c("IBD_inflamed", "IBD_non_inflamed"), 
+                        c("IBD_inflamed", "non-IBD"), 
+                        c("IBD_non_inflamed", "non-IBD")),
+    label = "p.signif",  # Show significance stars
+   ) +
+  scale_y_continuous(limits = c(0,0.55))
+
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1g.pdf"), width = 19, height = 6)
+``` 
 
 ### Session info
 
