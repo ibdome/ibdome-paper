@@ -134,6 +134,28 @@ samples_all_unique_rna <- samples_all_unique_rna %>%
   rename(PATIENT = sample_id.x)
 
 write.csv(samples_all_unique, file.path(params$resultdir, "samples_all_unique.csv"), row.names = FALSE, quote = FALSE)
+
+# Generating Disease tables for classifier
+# 1. Berlin+Erlangen
+disease_all <- samples_all_unique %>%
+  filter(disease %in% c("Crohn's disease", "Ulcerative colitis"))
+write.csv(disease_all, file.path(params$resultdir, "clini_table_disease_all.csv"), row.names = FALSE, quote = FALSE)
+# 2. Berlin subset
+disease_berlin <- disease_all %>%
+  filter(grepl("^ibdome_berlin", subject_id))
+write.csv(disease_berlin, file.path(params$resultdir, "clini_table_disease_all_berlin.csv"), row.names = FALSE, quote = FALSE)
+# 3. Erlangen subset
+disease_erlangen <- disease_all %>%
+  filter(grepl("^ibdome_erlangen", subject_id))
+write.csv(disease_erlangen, file.path(params$resultdir, "clini_table_disease_all_erlangen.csv"), row.names = FALSE, quote = FALSE)
+# 4. Erlangen inflamed subset
+disease_erlangen_inflamed <- disease_erlangen %>%
+  filter(
+    (normalized_naini_cortina_score > 0) |
+    (normalized_riley_score > 0)
+  )
+write.csv(disease_erlangen_inflamed, file.path(params$resultdir, "clini_table_disease_all_inflamed_erlangen.csv"), row.names = FALSE, quote = FALSE)
+
 # Filter to include only patients with at least one score
 samples_with_scores <- samples_all_unique %>%
   filter(!is.na(normalized_naini_cortina_score) | !is.na(normalized_riley_score))
