@@ -33,7 +33,8 @@ box::use(
    IHW[ihw],
    S4Vectors[...],
    quantiseqr[run_quantiseq, quantiplot],
-   ggpubr[stat_compare_means]
+   ggpubr[stat_compare_means],
+   purrr[map_dbl]
 )
 
 options(warn=-1)
@@ -337,7 +338,120 @@ ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1e.pdf"), width = 8, he
 ```
 
 
-## NOD2 mutation
+## Whole exome sequencing
+
+### Get mutations from known risk loki from database
+
+```{r}
+mut_table <- tbl(DB, "samples_subjects_tissues") |> filter(batch != "0") |> select(sample_id, subject_id) |> ### batch 0 is not yet in the database
+  left_join(tbl(DB, "data_wes")) |>
+  left_join(tbl(DB, "genes") |> select(c("ensg", "hgnc_symbol")), join_by("gene_id" == "ensg")) |>
+  collect()
+```
+
+### Create mutation matrix with mutated yes=1 and no=0
+
+```{r}
+# Convert to wide binary matrix
+mutation_matrix <- mut_table |>
+  filter(! is.na(hgnc_symbol)) |>
+  select(subject_id, hgnc_symbol) |>
+  distinct() |>
+  mutate(mutated = TRUE) |>
+  pivot_wider(names_from = hgnc_symbol, values_from = mutated, values_fill = FALSE)
+
+mutation_long <- mutation_matrix |>
+  pivot_longer(-subject_id, names_to="hgnc_symbol", values_to = "mutated")
+``` 
+
+### Get expressiond data
+
+Get RNA-seq data:
+```{r}
+rnaseq_data = tbl(DB, "samples_subjects_tissues") |>
+  inner_join(tbl(DB, "data_rnaseq"), by="sample_id") |> 
+  inner_join(tbl(DB, "genes"), by=c("gene_id"="ensg")) |>
+  select(subject_id, sample_id, tissue_coarse, disease, date, gene_id, hgnc_symbol, tpm, raw_counts) |> collect() 
+``` 
+
+
+### Merge both data types
+```{r}
+rna_df <- rnaseq_data |>
+  filter(hgnc_symbol %in% colnames(mutation_matrix)) |>
+  select(sample_id, subject_id, disease, hgnc_symbol, tpm) |>
+  filter(! hgnc_symbol %in% c("MIR3909", "MIR6069", "MIR6727", "RNU6-1082P")) ### remove genes that are not expressed
+  
+plot_df <- rna_df |>
+  left_join(mutation_long) |>
+  filter(! is.na(mutated)) ### remove those samples for which we don't have mutation data
+``` 
+
+Add group information:
+```{r}
+plot_df <- plot_df |>
+  mutate(disease = case_when(disease == "Crohn's disease" ~ "CD",
+                             disease == "Ulcerative colitis" ~ "UC",
+                             TRUE ~ disease)) |>
+  mutate(group = paste(disease, ifelse(mutated, "mutated", "not mutated"), sep = " - "))
+
+plot_df_filtered <- plot_df |>
+  filter(disease %in% c("CD", "UC", "non-IBD"))
+table(plot_df_filtered$group)
+``` 
+
+### Statistical differences
+
+### Adjust p-values
+
+```{r}
+pval_table <- plot_df_filtered |>
+  filter(!(disease == "non-IBD" & hgnc_symbol %in% c("F5", "GRID2IP"))) |> ### not enough observations for these genes in non-IBD
+  group_by(hgnc_symbol, disease) |>
+  summarise(
+    test = list(wilcox.test(tpm ~mutated)),
+    .groups = "drop"
+  ) |>
+    mutate(
+    p = map_dbl(test, ~ .x$p.value),
+    p.adj = p.adjust(p, method = "BH"), 
+    group1 = "not mutated",
+    group2 = "mutated"
+  )
+
+pval_table <- pval_table |>
+  mutate(group = paste(disease, "- mutated"))
+``` 
+
+### Plot mutations with significant differences in gene expression in at least one comparison
+
+```{r, fig.height=5, fig.width=15}
+pval_table_sig <- pval_table |>
+  filter(p.adj < 0.05)
+
+ggplot(plot_df_filtered |> filter(hgnc_symbol %in% pval_table_sig$hgnc_symbol), aes(x = group, y = tpm, fill = mutated)) +
+  geom_violin(trim = FALSE, alpha = 0.5, color = NA) +
+  geom_boxplot(width = 0.1, outlier.shape = NA) +
+  geom_jitter(width = 0.1, alpha = 0.4, color = "black") +
+  facet_wrap(~ hgnc_symbol, scales = "free_y", ncol=3) +
+  scale_fill_manual(values = c("FALSE" = "gray80", "TRUE" = "tomato")) +
+  labs(x = "", y = "expression [TPM]") +
+  theme_cowplot()+
+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  geom_text(data = pval_table_sig,
+            aes(x = 1.5, y = c(9.6, 158, 19.5), label = sprintf("adj p = %.2g", p.adj)), ### as it is always the same comparison, that is significant, we can set fixed positions!
+            inherit.aes = FALSE,
+            size = 4) +
+   geom_segment(data = pval_table_sig, ### add a line for the statistical pairs
+               aes(x = 1, xend = 2, y = c(9, 150, 18.5), yend = c(9, 150, 18.5)),
+               inherit.aes = FALSE,
+               linewidth = 0.5)
+
+ggsave(file.path(params$artifact_dir, "Figure1d.pdf"), width = 15, height = 5)
+``` 
+
+### NOD2 mutation
 
 Get coding variants from external file:
 *(Note that we only store the SNPs of interest within the IBDome database)*
@@ -514,14 +628,15 @@ sampleAnno = rnaseq_metadata |>
   select(sample_id, batch, sex, tissue_coarse, age_scaled, group)
 
 # get raw counts for the selected samples  
-count_mat = tbl(DB, "data_rnaseq") |>
+count_mat = rnaseq_data |>
   select(sample_id, gene_id, raw_counts) |>
   filter(sample_id %in% sampleAnno$sample_id) |>
-  collect() |>
   pivot_wider(id_cols=gene_id, names_from=sample_id, values_from=raw_counts) |>
   column_to_rownames("gene_id") |>
   round() # salmon does not necessarily contain integers
 
+# ensure correct order:
+count_mat <- count_mat[,sampleAnno$sample_id]
 table(colnames(count_mat) == sampleAnno$sample_id)
 ``` 
 
@@ -625,20 +740,12 @@ rnaseq_metadata = rnaseq_metadata |>
   left_join(histo_scores)
 ```
 
-Get RNA-seq data:
-```{r}
-rnaseq_data = tbl(DB, "samples_subjects_tissues") |>
-  inner_join(tbl(DB, "data_rnaseq"), by="sample_id") |> 
-  inner_join(tbl(DB, "genes"), by=c("gene_id"="ensg")) |>
-  select(subject_id, sample_id, tissue_coarse, date, gene_id, hgnc_symbol, tpm, raw_counts) |> collect() 
-``` 
 
 Plot heatmap:
 ```{r}
 tpm_IBDome_goi = rnaseq_data |>
   filter(hgnc_symbol %in% DE_immune) |>
   mutate(log_tpm = log10(tpm + 1)) |>
-  collect() |>
   pivot_wider(id_cols = "hgnc_symbol", names_from="sample_id", values_from="log_tpm") |>
   column_to_rownames("hgnc_symbol")
 
