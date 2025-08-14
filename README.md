@@ -137,6 +137,27 @@ pip install .
 
 **NOTE:** For additional information regarding the STAMP and marugoto pipeline usage please refer to the additional [documentation](https://gitlab.i-med.ac.at/icbi-lab/ibdome/ibdome-paper/-/blob/main/external_tools/README.md).
 
+### Reproducing the Results
+The scripts in this repository are numbered in the order they should be executed to fully reproduce the results of our paper.
+
+Please follow the numbering sequence carefully — skipping or reordering scripts may lead to missing intermediate files or errors.
+
+#### Execution Order
+Run the scripts startin from `01_IBDome_overview.Rmd` in ascending numerical order.
+```bash
+bash 01_IBDome_overview.Rmd
+bash 02_IPSS.Rmd
+bash 03a_gene_signatures.Rmd
+bash 03b_deseq2.sh
+...
+bash 07b_Confusion_Matrix_and_figure_maker.py
+```
+**Notes**:
+ - Each script may take a significant amount of time depending on hardware resources.
+ - Output from one script is often required as input for the next.
+ - Script numbers correspond to the figure numbers in the paper for easier reference.
+
+
 # Contact
 
 Please use the [issue tracker][issue-tracker].

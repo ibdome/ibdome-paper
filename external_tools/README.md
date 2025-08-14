@@ -138,14 +138,28 @@ Statistics are also automatically generated and saved in the `model_statistics` 
 bash 07a_UC_CD_Classifier.sh
 ```
 
-### Imaging Feature Matrix Extraction
+#### Manual usage
 
+For users who prefer to run the steps individually or customize the configuration, the same workflow can be executed manually using the `stamp` command-line tool:
+```bash
+stamp --config config.yaml train
+stamp --config config.yaml deploy
+stamp --config config.yaml statistics
+```
+**Notes**:
+ - The commands perform the same steps as the bash script: training, deployment, and statistics calculation.
+ - All input data paths and metadata are defined in the configuration file (`config.yaml` in this example). 
+ - Users can create alternative configuration files with different paths or settings if needed.
+
+
+### Imaging Feature Matrix Extraction
+Run the following script after completing `05a` and `05b`:
 Run:
 
 ```bash
-bash 05a_Imaging_feature_matrix_extraction.sh
+bash 05c_Imaging_feature_matrix_extraction.sh
 ```
-
-This will train a 5-fold cross-validation model on the combined Berlin and Erlangen cohorts using the Virchow2 model.
-This is necessary in order to have a model for each individual slide to enable the feature matrix extraction.
-After training, the feature matrix extraction will start automatically.
+This script performs a 5-fold cross-validation using the Virchow2 model to generate a set of models covering all slides, and then extracts the imaging feature matrix using these models.
+#### Notes for advanced use:
+ - If you want to extract the feature matrix with a different model or setup, you can train your own models and update the input paths inside `generate_img_features_classifier.py`
+ - The default configuration uses `config_virchow2_class_train_all.yaml` for training the 5-fold models.
