@@ -126,27 +126,26 @@ python marugoto/visualizations/mil_heatmaps.py \
 ```
 If you don't include `--superimpose`, no scaling is needed, and the heatmap and WSI will be displayed side-by-side.
 
-### Disease subtype prediction with STAMP
+### Disease Subtype Prediction with STAMP
 
-To simplify the process, a bash scripts is provided:
+To simplify the process, a bash script is provided to train a UC vs. CD classifier:
 
- - `07a_UC_CD_Classifier.sh`: train on Berlin cohort and deploy on Erlangen cohort (**all Tissue** and **all tissue inflamed** subcohort)
+ - `07a_UC_CD_Classifier.sh`: train on the Berlin cohort and deploy on Erlangen cohort (**all Tissue** and **all tissue inflamed** subcohorts)
 
-Statistics are also automatically calculated and could be find inside the `model_statistics` subfolder
+Statistics are also automatically generated and saved in the `model_statistics` subfolder.
 
 ```bash
 bash 07a_UC_CD_Classifier.sh
 ```
 
-### Imaging feature matrix extraction
+### Imaging Feature Matrix Extraction
 
-By running:
+Run:
 
 ```bash
 bash 05a_Imaging_feature_matrix_extraction.sh
 ```
 
-A 5FCV model will be trained on the Berlin+Erlangen cohorts with the Virchow2 model. 
-This is necessary in order to have a model for each individual slide for the feature matrxi extraction.
-After that the feature matrix extraction will start automatically.
-
+This will train a 5-fold cross-validation model on the combined Berlin and Erlangen cohorts using the Virchow2 model.
+This is necessary in order to have a model for each individual slide to enable the feature matrix extraction.
+After training, the feature matrix extraction will start automatically.
