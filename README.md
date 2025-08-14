@@ -10,7 +10,7 @@ Source code for the analyses accompanying the IBDome paper.
 ### Clone the repo
 
 ```
-git clone https://github.com/orgs/ibdome/repositories/ibdome-paper.git
+git clone https://github.com/ibdome/ibdome-paper.git
 ```
 
 ### Change directory and create a data folder
@@ -135,14 +135,14 @@ conda activate marugoto
 pip install .
 ```
 
-**NOTE:** For additional information regarding the STAMP and marugoto pipeline usage please refer to the additional [documentation](https://gitlab.i-med.ac.at/icbi-lab/ibdome/ibdome-paper/-/blob/main/external_tools/README.md).
+**NOTE:** For additional information regarding the STAMP and marugoto pipeline usage please refer to the additional [documentation](https://github.com/ibdome/ibdome-paper/blob/main/external_tools/README.md).
 
-### Reproducing the Results
+## Reproducing the Results
 The scripts in this repository are numbered in the order they should be executed to fully reproduce the results of our paper.
 
 Please follow the numbering sequence carefully — skipping or reordering scripts may lead to missing intermediate files or errors.
 
-#### Execution Order
+### Execution Order
 Run the scripts startin from `01_IBDome_overview.Rmd` in ascending numerical order.
 ```bash
 bash 01_IBDome_overview.Rmd

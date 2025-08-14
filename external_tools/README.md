@@ -1,4 +1,4 @@
-<img src="IBDome_Logo.png" width="120"> 
+<img src="../IBDome_Logo.png" width="120"> 
 
 # External tool documentation
 
