@@ -16,7 +16,7 @@ box::use(
    readr[write_tsv, write_csv, read_tsv, read_csv],
    dplyr[...],
    tibble[column_to_rownames, rownames_to_column],
-   tidyr[pivot_wider],
+   tidyr[pivot_wider, pivot_longer, drop_na],
    cowplot[theme_cowplot, background_grid],
    ggbeeswarm[geom_quasirandom],
    ggpubr[stat_cor],
@@ -31,7 +31,10 @@ box::use(
    ensembldb[transcripts, exonsBy],
    DESeq2[DESeqDataSetFromMatrix, estimateSizeFactors, counts, collapseReplicates, DESeq, results, summary, lfcShrink],
    IHW[ihw],
-   S4Vectors[...]
+   S4Vectors[...],
+   quantiseqr[run_quantiseq, quantiplot],
+   ggpubr[stat_compare_means],
+   purrr[map_dbl]
 )
 
 options(warn=-1)
@@ -130,7 +133,7 @@ patient_overview_wide = patient_overview |>
 ``` 
 
 Show in heatmap:
-```{r, fig.width=20, fig.height=5}
+```{r, fig.width=20, fig.height=4.5}
 # annotation
 anno_data = patient_overview |>
   select(- sample_type) |>
@@ -251,7 +254,7 @@ ggsave(file.path(params$artifact_dir, "Figure1b.pdf"), width = 6, height = 5)
 ```
 
 ### Number of total samples
-```{r, fig.width=6, fig.height=5}
+```{r, fig.width=6, fig.height=4}
 number_samples_total = tbl(DB, "samples_subjects_tissues") |>
    select(subject_id, disease, sample_type) |> group_by(sample_type, disease) |> count() |> collect() |>
    filter(sample_type != "16S") ## exclude for now as we only have 27 at the moment
@@ -270,30 +273,32 @@ number_samples_total |>
   theme_cowplot() + 
   xlab("")+
   scale_fill_manual(values=COLORS$disease, na.translate=FALSE) + 
+  scale_y_continuous(expand=expansion(mult =c(0,0.1))) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
     geom_text(
     aes(label=after_stat(y), group=sample_type),
     stat= 'summary', fun=sum, vjust=-0.1)
 
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1b.pdf"), width = 6, height = 5)
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1b.pdf"), width = 6, height = 4)
 ``` 
 
 ### Correlation between histopathology and stool score
-```{r, fig.width=10, fig.height=4.5}
+```{r, fig.width=8, fig.height=4.5}
 stool_vs_histo = histo_scores |> inner_join(stool_scores) |> inner_join(subject_timepoints |> select(subject_id, disease), by="subject_id") |>
   group_by(subject_id, date, tissue_coarse, disease) |> summarise_all(\(x) median(x, na.rm = TRUE)) |> ungroup()
 
-p1 <- make_scatter(stool_vs_histo, "Ulcerative colitis", "tissue_coarse", x="normalized_riley_score", y="stool_score", wjitter=0.02, hjitter=0.05) +
-  theme(legend.position="none") # hide first legend
-p2 <- make_scatter(stool_vs_histo, "Crohn's disease", "tissue_coarse", x="normalized_naini_cortina_score", y="stool_score", wjitter=0.02, hjitter=0.05) +
-  ylab("")
+p2 <- make_scatter(stool_vs_histo, "Ulcerative colitis", "tissue_coarse", x="normalized_riley_score", y="stool_score", wjitter=0.02, hjitter=0.05) +
+  theme(legend.position="none") + ylab("") # hide first legend
+p1 <- make_scatter(stool_vs_histo, "Crohn's disease", "tissue_coarse", x="normalized_naini_cortina_score", y="stool_score", wjitter=0.02, hjitter=0.05) +
+   theme(legend.position="bottom", legend.title = element_text(face="bold")) +
+  labs(color="tissue")
 
 p1+p2
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1c.pdf"), width = 10, height = 4.5)
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1c.pdf"), width = 8, height = 4.5)
 ``` 
 
 ### Correlation between histopathology and clinical scores
-```{r, fig.width=11, fig.height=4.5}
+```{r, fig.width=8, fig.height=4.5}
 clinical_vs_histo = clinical_scores |> 
   inner_join(histo_scores, by="subject_id") |>
   mutate(time_difference = abs(date - timepoint)) |> 
@@ -307,29 +312,146 @@ clinical_vs_histo = clinical_scores |>
 
 clinical_vs_histo  = clinical_vs_histo |> filter(time_difference < 180)
 
-p1 <- make_scatter(clinical_vs_histo, "Ulcerative colitis", "tissue_coarse", x="pms_score_sum", y="normalized_riley_score", wjitter=0.2, hjitter=0.05) +
-  theme(legend.position="none") # hide first legend
-p2 <- make_scatter(clinical_vs_histo, "Crohn's disease", "tissue_coarse", x="hbi_score_sum", y="normalized_naini_cortina_score", wjitter=0.2, hjitter=0.05)
+p2 <- make_scatter(clinical_vs_histo, "Ulcerative colitis", "tissue_coarse", x="pms_score_sum", y="normalized_riley_score", wjitter=0.2, hjitter=0.05) +
+  theme(legend.position="none")
+p1 <- make_scatter(clinical_vs_histo, "Crohn's disease", "tissue_coarse", x="hbi_score_sum", y="normalized_naini_cortina_score", wjitter=0.2, hjitter=0.05) +
+  theme(legend.position="bottom", legend.title = element_text(face="bold")) +
+  labs(color="tissue")
 
-p1+ plot_spacer() + p2 + plot_layout(widths = c(1,0.1,1))
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1d.pdf"), width = 10, height = 4.5)
+p1+ p2
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1d.pdf"), width = 8, height = 4.5)
 ``` 
 
 ### Correlation between endoscopy and histopathology scores
-```{r, fig.width=11, fig.height=4.5}
+```{r, fig.width=8, fig.height=4.5}
 endo_vs_histo = histo_scores |> inner_join(endo_scores) |> inner_join(subject_timepoints |> select(subject_id, disease), by="subject_id") |> 
   group_by(subject_id, date, tissue_coarse, disease) |> summarise_all(\(x) median(x, na.rm = TRUE)) |> ungroup()
 
-p1 <- make_scatter(endo_vs_histo, "Ulcerative colitis", "tissue_coarse", x="UCEIS", y="normalized_riley_score", wjitter=0.02, hjitter=0.05) +
+p2 <- make_scatter(endo_vs_histo, "Ulcerative colitis", "tissue_coarse", x="UCEIS", y="normalized_riley_score", wjitter=0.02, hjitter=0.05) +
   theme(legend.position="none") # hide first legend
-p2 <- make_scatter(endo_vs_histo, "Crohn's disease", "tissue_coarse", x="SES_CD", y="normalized_naini_cortina_score",  wjitter=0.02, hjitter=0.05)
+p1 <- make_scatter(endo_vs_histo, "Crohn's disease", "tissue_coarse", x="SES_CD", y="normalized_naini_cortina_score",  wjitter=0.02, hjitter=0.05) +
+  theme(legend.position = "bottom", legend.title = element_text(face="bold")) +
+  labs(color="tissue")
 
-p1+ plot_spacer() + p2 + plot_layout(widths = c(1,0.1,1))
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1e.pdf"), width = 10, height = 4.5)
+p1+ p2 
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1e.pdf"), width = 8, height = 4.5)
 ```
 
 
-## NOD2 mutation
+## Whole exome sequencing
+
+### Get mutations from known risk loki from database
+
+```{r}
+mut_table <- tbl(DB, "samples_subjects_tissues") |> filter(batch != "0") |> select(sample_id, subject_id) |> ### batch 0 is not yet in the database
+  left_join(tbl(DB, "data_wes")) |>
+  left_join(tbl(DB, "genes") |> select(c("ensg", "hgnc_symbol")), join_by("gene_id" == "ensg")) |>
+  collect()
+```
+
+### Create mutation matrix with mutated yes=1 and no=0
+
+```{r}
+# Convert to wide binary matrix
+mutation_matrix <- mut_table |>
+  filter(! is.na(hgnc_symbol)) |>
+  select(subject_id, hgnc_symbol) |>
+  distinct() |>
+  mutate(mutated = TRUE) |>
+  pivot_wider(names_from = hgnc_symbol, values_from = mutated, values_fill = FALSE)
+
+mutation_long <- mutation_matrix |>
+  pivot_longer(-subject_id, names_to="hgnc_symbol", values_to = "mutated")
+``` 
+
+### Get expressiond data
+
+Get RNA-seq data:
+```{r}
+rnaseq_data = tbl(DB, "samples_subjects_tissues") |>
+  inner_join(tbl(DB, "data_rnaseq"), by="sample_id") |> 
+  inner_join(tbl(DB, "genes"), by=c("gene_id"="ensg")) |>
+  select(subject_id, sample_id, tissue_coarse, disease, date, gene_id, hgnc_symbol, tpm, raw_counts) |> collect() 
+``` 
+
+
+### Merge both data types
+```{r}
+rna_df <- rnaseq_data |>
+  filter(hgnc_symbol %in% colnames(mutation_matrix)) |>
+  select(sample_id, subject_id, disease, hgnc_symbol, tpm) |>
+  filter(! hgnc_symbol %in% c("MIR3909", "MIR6069", "MIR6727", "RNU6-1082P")) ### remove genes that are not expressed
+  
+plot_df <- rna_df |>
+  left_join(mutation_long) |>
+  filter(! is.na(mutated)) ### remove those samples for which we don't have mutation data
+``` 
+
+Add group information:
+```{r}
+plot_df <- plot_df |>
+  mutate(disease = case_when(disease == "Crohn's disease" ~ "CD",
+                             disease == "Ulcerative colitis" ~ "UC",
+                             TRUE ~ disease)) |>
+  mutate(group = paste(disease, ifelse(mutated, "mutated", "not mutated"), sep = " - "))
+
+plot_df_filtered <- plot_df |>
+  filter(disease %in% c("CD", "UC", "non-IBD"))
+table(plot_df_filtered$group)
+``` 
+
+### Statistical differences
+
+### Adjust p-values
+
+```{r}
+pval_table <- plot_df_filtered |>
+  filter(!(disease == "non-IBD" & hgnc_symbol %in% c("F5", "GRID2IP"))) |> ### not enough observations for these genes in non-IBD
+  group_by(hgnc_symbol, disease) |>
+  summarise(
+    test = list(wilcox.test(tpm ~mutated)),
+    .groups = "drop"
+  ) |>
+    mutate(
+    p = map_dbl(test, ~ .x$p.value),
+    p.adj = p.adjust(p, method = "BH"), 
+    group1 = "not mutated",
+    group2 = "mutated"
+  )
+
+pval_table <- pval_table |>
+  mutate(group = paste(disease, "- mutated"))
+``` 
+
+### Plot mutations with significant differences in gene expression in at least one comparison
+
+```{r, fig.height=5, fig.width=15}
+pval_table_sig <- pval_table |>
+  filter(p.adj < 0.05)
+
+ggplot(plot_df_filtered |> filter(hgnc_symbol %in% pval_table_sig$hgnc_symbol), aes(x = group, y = tpm, fill = mutated)) +
+  geom_violin(trim = FALSE, alpha = 0.5, color = NA) +
+  geom_boxplot(width = 0.1, outlier.shape = NA) +
+  geom_jitter(width = 0.1, alpha = 0.4, color = "black") +
+  facet_wrap(~ hgnc_symbol, scales = "free_y", ncol=3) +
+  scale_fill_manual(values = c("FALSE" = "gray80", "TRUE" = "tomato")) +
+  labs(x = "", y = "expression [TPM]") +
+  theme_cowplot()+
+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  geom_text(data = pval_table_sig,
+            aes(x = 1.5, y = c(9.6, 158, 19.5), label = sprintf("adj p = %.2g", p.adj)), ### as it is always the same comparison, that is significant, we can set fixed positions!
+            inherit.aes = FALSE,
+            size = 4) +
+   geom_segment(data = pval_table_sig, ### add a line for the statistical pairs
+               aes(x = 1, xend = 2, y = c(9, 150, 18.5), yend = c(9, 150, 18.5)),
+               inherit.aes = FALSE,
+               linewidth = 0.5)
+
+ggsave(file.path(params$artifact_dir, "Figure1d.pdf"), width = 15, height = 5)
+``` 
+
+### NOD2 mutation
 
 Get coding variants from external file:
 *(Note that we only store the SNPs of interest within the IBDome database)*
@@ -483,7 +605,7 @@ lolliplot(mutation_gr,  # GRanges object with mutations
           ylab="NOD2",
           rescale = TRUE)
 
-ggsave(file.path(params$artifact_dir, "Figure1d.pdf"), width = 15, height = 5)
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1f.pdf"), width = 15, height = 5)
 ``` 
 
 ## DE analysis comparing IBD inflamed vs non-IBD samples
@@ -506,14 +628,15 @@ sampleAnno = rnaseq_metadata |>
   select(sample_id, batch, sex, tissue_coarse, age_scaled, group)
 
 # get raw counts for the selected samples  
-count_mat = tbl(DB, "data_rnaseq") |>
+count_mat = rnaseq_data |>
   select(sample_id, gene_id, raw_counts) |>
   filter(sample_id %in% sampleAnno$sample_id) |>
-  collect() |>
   pivot_wider(id_cols=gene_id, names_from=sample_id, values_from=raw_counts) |>
   column_to_rownames("gene_id") |>
   round() # salmon does not necessarily contain integers
 
+# ensure correct order:
+count_mat <- count_mat[,sampleAnno$sample_id]
 table(colnames(count_mat) == sampleAnno$sample_id)
 ``` 
 
@@ -620,11 +743,9 @@ rnaseq_metadata = rnaseq_metadata |>
 
 Plot heatmap:
 ```{r}
-tpm_IBDome_goi = tbl(DB, "data_rnaseq") |>
-  left_join(tbl(DB, "genes"), by=c("gene_id" = "ensg")) |>
+tpm_IBDome_goi = rnaseq_data |>
   filter(hgnc_symbol %in% DE_immune) |>
   mutate(log_tpm = log10(tpm + 1)) |>
-  collect() |>
   pivot_wider(id_cols = "hgnc_symbol", names_from="sample_id", values_from="log_tpm") |>
   column_to_rownames("hgnc_symbol")
 
@@ -725,6 +846,80 @@ draw(hm_IBDome,
 dev.off()
 ```
 
+## Deconvolution with quanTIseq
+
+### Prepare TPM matrix
+
+```{r}
+tpm_mat = rnaseq_data |>
+  pivot_wider(id_cols=c("gene_id", "hgnc_symbol"), names_from="sample_id", values_from="tpm") |>
+  group_by(hgnc_symbol) |>
+  summarise(across(starts_with("ibdome"), mean, na.rm = TRUE)) |>
+  drop_na() |>
+  column_to_rownames('hgnc_symbol')
+``` 
+
+### Run quanTIseq
+
+```{r}
+ti_racle <- quantiseqr::run_quantiseq(
+  expression_data = tpm_mat,
+  signature_matrix = "TIL10",
+  is_arraydata = FALSE,
+  is_tumordata = FALSE,
+  scale_mRNA = TRUE
+)
+``` 
+
+```{r, fig.height=50, fig.width=10}
+quantiplot(ti_racle)
+``` 
+
+### Combine with metadata
+
+```{r}
+DCdata_long_inflammation <- ti_racle |> 
+  select(- c('Other', 'Dendritic.cells', 'Monocytes')) |>
+  pivot_longer(cols=!Sample, names_to='celltype', values_to='fraction')|>
+  dplyr::rename("sample_id" = "Sample") |>
+  left_join(rnaseq_metadata |> select('sample_id', 'group', 'tissue_coarse'))
+``` 
+
+```{r, fig.height=6, fig.width=19}
+# Filter out NA values and keep only colon/ileum samples:
+DC_filtered <- DCdata_long_inflammation |>
+  filter(!is.na(group)) |>
+  filter(tissue_coarse %in% c("ileum", "colon"))
+
+# Create the box plot with adjusted facet spacing
+ggplot(DC_filtered, aes(x = group, y = fraction, fill = group)) +
+  geom_boxplot() +
+  facet_grid(tissue_coarse ~ celltype) +
+  theme_cowplot() + background_grid() +
+  xlab("")+
+  ylab("cell fraction")+
+  theme(
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 16),
+    legend.text = element_text(size = 16),
+    legend.title = element_blank(),
+    axis.text.x = element_blank(),
+    strip.text = element_text(size = 16),  # Adjust facet label text size
+    legend.position = "bottom"
+  ) +
+  scale_fill_manual(values = COLORS$group) +  
+  stat_compare_means(
+    aes(group=group),
+    method = "wilcox",
+    comparisons = list(c("IBD_inflamed", "IBD_non_inflamed"), 
+                        c("IBD_inflamed", "non-IBD"), 
+                        c("IBD_non_inflamed", "non-IBD")),
+    label = "p.signif",  # Show significance stars
+   ) +
+  scale_y_continuous(limits = c(0,0.55))
+
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1g.pdf"), width = 19, height = 6)
+``` 
 
 ### Session info
 

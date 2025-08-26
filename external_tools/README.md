@@ -1,4 +1,4 @@
-<img src="IBDome_Logo.png" width="120"> 
+<img src="../IBDome_Logo.png" width="120"> 
 
 # External tool documentation
 
@@ -125,3 +125,41 @@ python marugoto/visualizations/mil_heatmaps.py \
     --heatmap_scale_y 0.993
 ```
 If you don't include `--superimpose`, no scaling is needed, and the heatmap and WSI will be displayed side-by-side.
+
+### Disease Subtype Prediction with STAMP
+
+To simplify the process, a bash script is provided to train a UC vs. CD classifier:
+
+ - `07a_UC_CD_Classifier.sh`: train on the Berlin cohort and deploy on Erlangen cohort (**all Tissue** and **all tissue inflamed** subcohorts)
+
+Statistics are also automatically generated and saved in the `model_statistics` subfolder.
+
+```bash
+bash 07a_UC_CD_Classifier.sh
+```
+
+#### Manual usage
+
+For users who prefer to run the steps individually or customize the configuration, the same workflow can be executed manually using the `stamp` command-line tool:
+```bash
+stamp --config config.yaml train
+stamp --config config.yaml deploy
+stamp --config config.yaml statistics
+```
+**Notes**:
+ - The commands perform the same steps as the bash script: training, deployment, and statistics calculation.
+ - All input data paths and metadata are defined in the configuration file (`config.yaml` in this example). 
+ - Users can create alternative configuration files with different paths or settings if needed.
+
+
+### Imaging Feature Matrix Extraction
+Run the following script after completing `05a` and `05b`:
+Run:
+
+```bash
+bash 05c_Imaging_feature_matrix_extraction.sh
+```
+This script performs a 5-fold cross-validation using the Virchow2 model to generate a set of models covering all slides, and then extracts the imaging feature matrix using these models.
+#### Notes for advanced use:
+ - If you want to extract the feature matrix with a different model or setup, you can train your own models and update the input paths inside `generate_img_features_classifier.py`
+ - The default configuration uses `config_virchow2_class_train_all.yaml` for training the 5-fold models.

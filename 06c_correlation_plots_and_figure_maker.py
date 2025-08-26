@@ -409,37 +409,6 @@ out_file = outdir / "other_corr_plots_performance.png"
 print(f'Writing output to file: {out_file}')
 plt.savefig(out_file, dpi=300, bbox_inches='tight')
 
-## Foundation Models Performance
-
-r_values = np.array([
-    [0.745, 0.801, 0.792, 0.784],  # Original score row
-    [0.903, 0.929, 0.933, 0.927]   # Predicted score row
-])
-
-row_labels = ['normalized modified\n Naini-Cortina Score', 'normalized modified\n Riley Score']
-column_labels = ['CHIEF', 'UNI2', 'Virchow2', 'H-optimus-0']
-
-df = pd.DataFrame(r_values, index=row_labels, columns=column_labels)
-
-fig, ax = plt.subplots(figsize=(8, 2.8))
-
-sns.heatmap(df, annot=True, fmt=".3f", cmap="Reds", vmin=0, vmax=1,
-            cbar_kws={'label': 'Pearson\'s R'}, annot_kws={"size": 13},
-            yticklabels=False, linewidths=1, linecolor='white')
-
-for i, label in enumerate(row_labels):
-    ax.text(-0.9, i + 0.5, label, ha='center', va='center', rotation=0, fontsize=13)
-ax.tick_params(axis='x', labelsize=13)
-
-plt.title('Pearson correlation coefficient', fontsize=16)
-plt.tight_layout()
-
-outdir = Path("./results/correlation_plots/")
-outdir.mkdir(parents=True, exist_ok=True)
-out_file = outdir / "foundation_models_performance.png"
-print(f'Writing output to file: {out_file}')
-plt.savefig(out_file, dpi=300, bbox_inches='tight')
-
 ## Donut plot main figure + histo/RNA/Protein/WES
 
 # Define the color scheme

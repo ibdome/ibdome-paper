@@ -25,14 +25,12 @@ process de_analysis {
     out_dir = test + "_vs_" + ref
     def remove_batch_effect = params.remove_batch_effect ? "--remove_batch_effect" : ''
     def batch_col = params.batch_col != "" ? "--batch_col=${params.batch_col}" : ''
-    def nfcore = params.nfcore ? "--nfcore" : ''
-
+    
     """
     mkdir -p ${out_dir}
     runDESeq2.R ${sample_sheet} ${raw_counts} \\
       --result_dir=${out_dir} \\
       --sample_col=${sample_col}\\
-      ${nfcore} \\
       --c1=${test} \\
       --c2=${ref} \\
       --condition_col=${condcol} \\
@@ -40,7 +38,6 @@ process de_analysis {
       ${batch_col} \\
       ${covariate_formula} \\
       --plot_title="${test} vs ${ref}" \\
-      --organism=${params.organism} \\
       --n_cpus=${task.cpus} \\
       --fdr_cutoff=0.05 \\
       --save_workspace

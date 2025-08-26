@@ -1,0 +1,522 @@
+---
+title: "40_MOFA"
+output: html_document
+date: "2025-06-03"
+params:
+  database: "data/ibdome_v1.0.1.sqlite"
+  artifact_dir: "results"
+  feature_mat: "results/img_feature_matrix.csv"
+  genepy_mat: "results/genepy_scores.tsv"
+---
+
+## Multi-omics Factor Analysis (MOFA)
+
+```{r}
+library(reticulate)
+use_condaenv("MOFA_env", required=TRUE)
+library(rhdf5)
+
+box::use(
+   dplyr[...],
+   lib/colors[COLORS],
+   lib/db[db_connect],
+   MOFA2[...],
+   readr[read_tsv, read_csv],
+   tibble[column_to_rownames],
+   tidyr[pivot_wider, drop_na],
+   ggplot2[...],
+   corrplot[corrplot],
+   viridis[scale_fill_viridis],
+   patchwork[...]
+)
+```
+
+Connect to the IBDome database:
+```{r}
+DB = db_connect(params$database)
+```
+
+### Get metadata
+
+```{r}
+samples <- tbl(DB, "samples_subjects_tissues_with_inflammation") |>
+  mutate(localization = case_when(
+    disease == "Crohn's disease" ~ localization_cd, 
+    disease == "Ulcerative colitis" ~ localization_uc, 
+    TRUE ~ NA_character_
+  )) |>
+  collect() 
+``` 
+
+
+Samples should be grouped by date (and tissue in case of RNA-seq and histopathology):
+```{r}
+samples_rna <- samples |>
+  filter(sample_type == "RNA-seq") |>
+  group_by(subject_id, date, tissue) |>
+  slice(1) |>
+  ungroup() |>
+  select(sample_id_rna = sample_id, subject_id, date, tissue)
+
+samples_imaging <- samples |>
+  filter(sample_type == "H&E staining") |>
+    filter(disease %in% c("Crohn's disease", "Ulcerative colitis"))  ### we only have features for UC and CD images
+
+samples_imaging <- samples_imaging |>
+  filter(! is.na(tissue)) |>
+  filter(! is.na(disease)) |>
+  group_by(subject_id, date, tissue) |>
+  slice(1) |>
+  ungroup() |>
+  select(sample_id_imaging = orig_id, subject_id, date, tissue) |>
+  ### rename the two newly scanned images manually
+  mutate(sample_id_imaging = case_when(sample_id_imaging == "TRR241-B-Re-2019-161047_stenosis_-_2023-11-07_11.18.56" ~ "TRR241-B-Re-2019-161047_stenosis_HE_Scan",
+                                       sample_id_imaging == "TRR241-E-Bx-2023-1637_sigma_HE_Scan1" ~ "TRR241-E-Bx-2023-1637_sigma_HE_Scan",
+                                       TRUE ~ sample_id_imaging))
+
+samples_wes <- samples |>
+  filter(sample_type == "WES") |>
+  filter(batch != "0") |>
+  group_by(subject_id, date) |>
+  slice(1) |>
+  ungroup() |>
+  select(sample_id_wes = sample_id, orig_id, subject_id, date)
+  
+samples_olink <- samples |>
+  filter(sample_type == "Olink") |>
+  group_by(subject_id, date) |>
+  slice(1) |>
+  ungroup() |>
+  select(sample_id_olink = sample_id, subject_id, date)
+
+### Full join:
+samples_grouped = samples_rna|>
+  full_join(samples_imaging) |>
+  full_join(samples_olink) |>
+  full_join(samples_wes)
+
+metadata <- tbl(DB, "subjects") |>
+  collect() |> 
+  mutate(localization = case_when(
+    disease == "Crohn's disease" ~ localization_cd, 
+    disease == "Ulcerative colitis" ~ localization_uc, 
+    TRUE ~ NA_character_
+  )) |>
+  select(subject_id, disease, sex, localization)
+
+### Add inflammation status from histo-scores:
+histo <- tbl(DB, "samples_subjects_tissues") |>
+  filter(sample_type == "histopathology") |>
+  left_join(tbl(DB, "data_histopathology2")) |>
+  select(subject_id, date, disease, tissue, normalized_naini_cortina_score, normalized_riley_score) |>
+  mutate(histo_score = case_when(disease == "Crohn's disease" ~ normalized_naini_cortina_score, 
+                                 disease == "Ulcerative colitis" ~ normalized_riley_score,
+                                 disease == "Indeterminate colitis" & is.na(normalized_naini_cortina_score) ~ normalized_riley_score,
+                                 disease == "non-IBD" & is.na(normalized_naini_cortina_score) ~ normalized_riley_score,
+                                 TRUE ~ normalized_naini_cortina_score)) |>
+  mutate(inflammation_status = ifelse(histo_score > 0, "inflamed", "non_inflamed")) |>
+  select(-c("normalized_naini_cortina_score", "normalized_riley_score")) |>
+  collect()
+
+### There is one case where we have two different histo-scores for the same tissue --> group and summarise
+histo <- histo |>
+  group_by(subject_id, date, tissue) |>
+  slice(1)
+
+### Add tissue-coarse for better interpretability
+tissues <- tbl(DB, "tissues") |>
+  collect()
+
+samples_grouped_filtered <- samples_grouped |>
+  unique() |>
+  left_join(metadata) |>
+  left_join(histo) |>
+  left_join(tissues) |>
+  mutate(sample_id = paste(subject_id, date, tissue, sep="_")) 
+```
+
+```{r}
+dim(samples_grouped_filtered)
+``` 
+
+
+### Prepare data tables
+
+*A list of matrices, where each entry corresponds to one view. Samples are stored in columns and features in rows.*
+
+1. WES (genePY score)
+
+```{r}
+genepy <- read_tsv(params$genepy_mat) |>
+  pivot_wider(names_from=IND, values_from=score, id_cols=Gene) |>
+  column_to_rownames("Gene")
+
+sample_ids_orig <- samples_grouped_filtered |>
+  filter(!is.na(sample_id_wes)) |>
+  pull(orig_id) |>
+  unique()
+
+genepy_mat <- genepy[, sample_ids_orig]
+
+### set NAs to 0 
+genepy_mat[is.na(genepy_mat)] <- 0
+``` 
+
+Filter for the most highly variable mutations:
+```{r}
+mutation_mads <- apply(genepy_mat, 1, mad)
+top_mutations <- order(mutation_mads, decreasing=TRUE)[1:1000]
+
+genepy_mat <- genepy_mat[top_mutations,]
+``` 
+
+2. RNAseq (TPM table)
+```{r}
+rnaseq_data = tbl(DB, "samples_subjects_tissues") |>
+  inner_join(tbl(DB, "data_rnaseq"), by="sample_id") |> 
+  inner_join(tbl(DB, "genes"), by=c("gene_id"="ensg")) |>
+  collect() 
+```
+
+```{r}
+tpm_mat = rnaseq_data |>
+  mutate(log_tpm = log(tpm+1)) |>
+  pivot_wider(id_cols=c("gene_id", "hgnc_symbol"), names_from="sample_id", values_from="log_tpm") |>
+  group_by(hgnc_symbol) |>
+  summarise(across(starts_with("ibdome"), \(x) mean(x, na.rm = TRUE))) |>
+  drop_na() |>
+  column_to_rownames('hgnc_symbol') 
+
+## Keep genes that are expressed in at least 10 samples:
+tpm_mat = tpm_mat[rowSums(tpm_mat !=0) >= 10, ]
+
+## Filter for most highly variable genes:
+gene_mads <- apply(tpm_mat, 1, mad)
+top_genes <- order(gene_mads, decreasing=TRUE)[1:5000]
+
+tpm_mat <- tpm_mat[top_genes, ]
+dim(tpm_mat)
+``` 
+
+Filter for matching samples:
+```{r}
+sample_ids_rna <- samples_grouped_filtered |>
+  filter(!is.na(sample_id_rna)) |>
+  pull(sample_id_rna) |> 
+  unique()
+
+tpm_mat = tpm_mat[,sample_ids_rna]
+``` 
+
+
+3. Olink (NPX values)
+```{r}
+olink_mat = tbl(DB, "data_olink") |>
+  collect() |>
+  pivot_wider(id_cols="Assay", names_from="sample_id", values_from="NPX") |>
+  column_to_rownames("Assay")
+
+dim(olink_mat)
+``` 
+
+Filter for matching samples:
+```{r}
+sample_ids_olink <- samples_grouped_filtered |>
+  filter(!is.na(sample_id_olink)) |>
+  pull(sample_id_olink) |> 
+  unique()
+
+olink_mat = olink_mat[,sample_ids_olink]
+``` 
+
+Keep proteins that are expressed in at least 10 samples:
+```{r}
+olink = olink_mat[rowSums(olink_mat !=0) > 10, ]
+dim(olink_mat)
+```
+
+
+4. Imaging features
+```{r}
+image_mat <- read_csv(params$feature_mat, col_names=FALSE, show_col_types = FALSE) |>
+  column_to_rownames("X1") |>
+  t()
+
+colnames(image_mat) <- gsub("\\.(ndpi|qptiff|ome\\.tif)$", "", colnames(image_mat))
+dim(image_mat)
+``` 
+
+
+```{r}
+sample_ids_imaging <- samples_grouped_filtered |>
+  filter(!is.na(sample_id_imaging)) |>
+  pull(sample_id_imaging) |>
+  unique()
+
+image_mat = image_mat[,sample_ids_imaging]
+```
+
+
+### Create MOFA object
+
+*Missing values must be filled in prior to creating the MOFA object *
+
+```{r}
+align_matrix_to_map <- function(data_matrix, mapping_column_name) {
+  
+  # Create Mapping Lookup from the specific ID to the common sample_id
+  specific_to_common_mapping <- setNames(samples_grouped_filtered$sample_id, samples_grouped_filtered[[mapping_column_name]])
+
+  # Rename Columns in Data Matrix
+  # Identify columns in the data_matrix that have a corresponding mapping.
+  existing_cols_to_map <- intersect(colnames(data_matrix), names(specific_to_common_mapping))
+
+   # Create a copy of the data_matrix to avoid modifying the original in place
+  # if this function is called inside a loop or directly assigned.
+  processed_data_matrix <- data_matrix
+
+  # Rename these columns in the copied data matrix.
+  # 'match' ensures that the renaming happens correctly even if column order differs.
+  colnames(processed_data_matrix)[match(existing_cols_to_map, colnames(processed_data_matrix))] <- specific_to_common_mapping[existing_cols_to_map]
+
+  # Align and Fill with NA
+  # Get the names of columns in the processed matrix that are now part of our master list.
+  present_in_master <- intersect(samples_grouped_filtered$sample_id, colnames(processed_data_matrix))
+
+  # Identify which master sample IDs are missing from the processed matrix.
+  missing_ids <- setdiff(samples_grouped_filtered$sample_id, colnames(processed_data_matrix))
+
+  # Create NA columns for missing samples.
+  if (length(missing_ids) > 0) {
+    na_df <- as.data.frame(matrix(NA, nrow = nrow(processed_data_matrix), ncol = length(missing_ids)))
+    colnames(na_df) <- missing_ids
+    # Combine existing and NA columns.
+    processed_data_matrix_aligned <- cbind(processed_data_matrix[, present_in_master, drop = FALSE], na_df)
+  } else {
+    # If no missing IDs, just select and reorder the present ones.
+    processed_data_matrix_aligned <- processed_data_matrix[, present_in_master, drop = FALSE]
+  }
+
+  #  Final Reordering
+  # Ensure the columns are in the exact order of samples_grouped_filtered$sample_id.
+  final_aligned_matrix <- processed_data_matrix_aligned[, samples_grouped_filtered$sample_id, drop = FALSE]
+
+  return(final_aligned_matrix)
+}
+``` 
+
+```{r}
+aligned_rna_mat <- align_matrix_to_map(tpm_mat, "sample_id_rna")
+aligned_olink_mat <- align_matrix_to_map(olink_mat, "sample_id_olink")
+aligned_wes_mat <- align_matrix_to_map(genepy_mat, "orig_id")
+aligned_image_mat <- align_matrix_to_map(image_mat, "sample_id_imaging")
+
+data_list <- list("RNA" = aligned_rna_mat,
+                  "WES" = aligned_wes_mat,
+                  "Olink" = aligned_olink_mat,
+                  "HE" = aligned_image_mat
+                  )
+``` 
+
+Convert to numeric:
+```{r}
+data_list <- lapply(data_list, function(x) {
+  x <- as.matrix(x)  # ensure it's a matrix
+  storage.mode(x) <- "numeric"  # force numeric type
+  return(x)
+})
+
+lapply(data_list, function(x) !all(sapply(x, is.numeric)))
+```
+
+Create MOFA object:
+```{r}
+MOFAobject <- create_mofa_from_matrix(data_list)
+``` 
+
+### Plot data overview
+
+```{r, fig.height=4, fig.width=6}
+plot_data_overview(MOFAobject) +
+  facet_grid(view ~ ., scales = "free", space = "free") +
+  theme(panel.spacing.y = unit(0.01, "mm")) +
+  theme(strip.text.y.right = element_blank(),
+    plot.caption = element_text(hjust = 0.5, size=12)
+  ) +
+  labs(caption = paste("N = ", dim(samples_grouped_filtered)[1]))
+
+ggsave(file.path(params$artifact_dir, "Figure5a.pdf"), width = 6, height = 4)
+``` 
+
+### Define parameters
+
+```{r}
+data_opts <- get_default_data_options(MOFAobject)
+model_opts <- get_default_model_options(MOFAobject)
+train_opts <- get_default_training_options(MOFAobject)
+
+data_opts$scale_groups = TRUE
+train_opts$convergence_mode <- "slow"
+train_opts$seed <- 42
+``` 
+
+
+### Train the MOFA model
+
+```{r}
+MOFAobject <- prepare_mofa(MOFAobject,
+  data_options = data_opts,
+  model_options = model_opts,
+  training_options = train_opts
+)
+```
+
+### Run MOFA
+```{r}
+MOFAobject <- run_mofa(MOFAobject)
+```
+
+### Add metadata to the model
+```{r}
+samples_metadata(MOFAobject) <- samples_grouped_filtered |> select(sample = sample_id, disease, sex, tissue = tissue_coarse, localization, inflammation_status, histo_score)
+``` 
+
+```{r, fig.height=8, fig.width=6}
+plot_factor_cor(MOFAobject)
+``` 
+
+```{r, fig.height=6, fig.width=4}
+plot_variance_explained(MOFAobject)
+ggsave(file.path(params$artifact_dir, "Figure5b.pdf"), width = 4, height = 6)
+``` 
+
+```{r, fig.height=3, fig.width=2}
+plot_variance_explained(MOFAobject, plot_total = T)[[2]]
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure5a.pdf"), width = 2, height = 3)
+``` 
+
+### Correlate factors with covariates
+```{r, fig.height=2, fig.width=6}
+covariates <- c("disease", "sex", "localization", "tissue", "inflammation_status", "histo_score")
+
+p_cor <- correlate_factors_with_covariates(MOFAobject,
+                                  covariates=covariates,
+                                  plot='r', 
+                                  transpose=TRUE,
+                                  return_data = TRUE)
+
+corrplot(p_cor, col = colorRampPalette(c("blue", "white", "red"))(10), tl.col="black")
+
+pdf(file.path(params$artifact_dir, "Figure5c.pdf"), width = 6, height = 2)
+corrplot(p_cor, col = colorRampPalette(c("blue", "white", "red"))(10), tl.col="black")
+dev.off()
+``` 
+
+
+### Investigate factors
+
+1. Factor 1 ~ tissue
+
+```{r, fig.height=3, fig.width=5}
+plot_factor(MOFAobject, factors = 1, color_by = "tissue",
+  add_violin = TRUE, dodge = TRUE) +
+  scale_fill_manual(values=COLORS$tissue) + 
+  theme(legend.title = element_text(face = "bold"))
+
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure5b.pdf"), width = 5, height = 3)
+```
+
+2. Factor 2 ~ inflammation 
+
+```{r, fig.height=3, fig.width=2.5}
+plot_factor(MOFAobject, factors = 2, color_by = "histo_score") +
+  scale_fill_viridis(option="B") + 
+  theme(legend.title = element_text(face = "bold"))
+
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure5c.pdf"), width = 2.5, height = 3)
+```
+
+```{r, fig.height=3, fig.width=4}
+plot_factor(MOFAobject, factors = 2, color_by = "inflammation_status",
+  add_violin = TRUE, dodge = TRUE) +
+  scale_fill_manual(values=COLORS$inflammation_status) + 
+  theme(legend.title = element_text(face = "bold"))
+
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure5d.pdf"), width = 4, height = 3)
+```
+
+3. Factors 1-9 ~ disease
+
+```{r, fig.height=15, fig.width=15}
+plot_factors(MOFAobject, factors = 1:9, color_by = "disease")
+``` 
+
+
+```{r, fig.height=4, fig.width=6}
+plot_factors(MOFAobject, 
+                  factors = c(1,4), 
+                  dot_size = 2,
+                  color_by='disease',
+                  show_missing = T) + 
+  geom_hline(yintercept=-1, linetype="dashed") +
+  geom_vline(xintercept=(-0.5), linetype="dashed") +
+  scale_fill_manual(values=COLORS$disease) +
+  theme(legend.title = element_text(face = "bold", size=12),
+        legend.text = element_text(size=10))
+
+ggsave(file.path(params$artifact_dir, "ExtendedDataFigure5e.pdf"), width = 6, height = 4)
+``` 
+
+
+### Non-linear dimensionality reduction
+
+```{r}
+set.seed(1)
+MOFAobject <- run_umap(MOFAobject)
+``` 
+
+
+```{r, fig.height=6, fig.width=10}
+p4 <- plot_dimred(MOFAobject,
+            method="UMAP",
+            color_by="disease") +
+  scale_fill_manual(values=COLORS$disease) + 
+  theme(legend.title = element_text(face = "bold"))
+ 
+p2 <- plot_dimred(MOFAobject,
+            method="UMAP",
+            color_by="inflammation_status") +
+  scale_fill_manual(values=COLORS$inflammation_status) + 
+  theme(legend.title = element_text(face = "bold"))
+
+p3 <- plot_dimred(MOFAobject,
+            method="UMAP",
+            color_by="tissue") +
+  scale_fill_manual(values=COLORS$tissue_coarse)+ 
+  theme(legend.title = element_text(face = "bold"))
+ 
+p1 <- plot_dimred(MOFAobject,
+            method="UMAP",
+            color_by="histo_score") + 
+  scale_fill_viridis(option="B")+ 
+  theme(legend.title = element_text(face = "bold"))
+
+# Combine into 2x2 grid
+(p1 | p2) / (p3 | p4) + 
+  plot_annotation(
+    theme = theme(plot.margin = margin(10, 10, 10, 10))
+  ) & 
+  theme(
+    axis.title.x = element_text(size = 10, margin = margin(t = 10)),
+    axis.title.y = element_text(size = 10, margin = margin(r = 10))
+  ) & 
+  labs(x = "UMAP 1", y = "UMAP 2")
+
+ggsave(file.path(params$artifact_dir, "Figure5d.pdf"), width = 10, height = 6)
+``` 
+
+### Session info
+
+```{r}
+sessionInfo()
+``` 

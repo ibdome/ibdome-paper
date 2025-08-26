@@ -1,9 +1,9 @@
 #!/usr/bin/env Rscript
-'runDESeq2_ICBI.R
+'runDESeq2.R
 
 Usage:
-  runDESeq2_ICBI.R <sample_sheet> <count_table> --result_dir=<res_dir> --c1=<c1> --c2=<c2> [options]
-  runDESeq2_ICBI.R --help
+  runDESeq2.R <sample_sheet> <count_table> --result_dir=<res_dir> --c1=<c1> --c2=<c2> [options]
+  runDESeq2.R --help
 
 Arguments:
   <sample_sheet>                CSV file with the sample annotations.
@@ -15,9 +15,6 @@ Mandatory options:
   --c2=<c2>                     Contrast level 2 (baseline). Needs to be contained in condition_col.
 
 Optional options:
-  --nfcore                      Indicate that the input samplesheet is from the nf-core RNA-seq ppipeline.
-                                Will merge entries from the same sample and infer the sample_id from `group` and `replicate`.
-                                If set, this option overrides `sample_col`.
   --condition_col=<cond_col>    Column in sample annotation that contains the condition [default: group]
   --sample_col=<sample_col>     Column in sample annotation that contains the sample names
                                 (needs to match the colnames of the count table). [default: sample]
@@ -34,15 +31,9 @@ Optional options:
   --prefix=<prefix>             Results file prefix. Is built from contrasts per default.
   --fdr_cutoff=<fdr>            False discovery rate for GO analysis and volcano plots [default: 0.1]
   --fc_cutoff=<log2 fc cutoff>  Fold change (log2) cutoff for volcano plots [default: 1]
-  --gtf_file=<gtf>              Path to the GTF file used for featurecounts. If specified, a Biotype QC
-                                will be performed.
   --gene_id_type=<id_type>      Type of the identifier in the `gene_id` column compatible with AnnotationDbi [default: ENSEMBL]
   --n_cpus=<n_cpus>             Number of cores to use for DESeq2 [default: 1]
-  --organism=<human|mouse>      Ensebml annotation db [default: human]
   --save_workspace              Save R workspace for this analysis [default: FALSE]
-  --save_init_workspace         Save R workspace before analysis for manual step by step debugging [default: FALSE]
-  --save_sessioninfo            Save R sessionInfo() to keep info about library version [default: TRUE]
-  --config_file			            Config File used to run the Pipeline, needed for the report [default: "/home/floriani/myScratch/gitlab/nextflow.config"]
 ' -> doc
 
 library("conflicted")
@@ -56,9 +47,6 @@ library("DESeq2")
 library("IHW")
 library("ggplot2")
 library("pcaExplorer")
-#library("topGO")
-#library("clusterProfiler")
-#library("ReactomePA")
 library("writexl")
 library("readr")
 library("dplyr")
@@ -72,6 +60,7 @@ library("stringr")
 library("ggrepel")
 conflict_prefer("paste", "base")
 conflict_prefer("rename", "dplyr")
+library("org.Hs.eg.db", character.only = TRUE)
 remove_ensg_version = function(x) gsub("\\.[0-9]*$", "", x)
 
 #### Get parameters from docopt
@@ -88,7 +77,6 @@ prefix <- arguments$prefix
 plot_title <- arguments$plot_title
 
 # Sample information and contrasts
-nfcore = arguments$nfcore
 cond_col = arguments$condition_col
 sample_col = arguments$sample_col
 contrast = c(cond_col, arguments$c1, arguments$c2)
@@ -104,27 +92,8 @@ fc_cutoff = as.numeric(arguments$fc_cutoff)
 # Other
 n_cpus = as.numeric(arguments$n_cpus)
 
-# set organism (human or mouse)
-organism = arguments$organism
-
 # save R workspace
 save_ws = arguments$save_workspace
-
-if (organism == "human") {
-    anno_db = "org.Hs.eg.db"
-    org_kegg = "hsa"
-    org_reactome = "human"
-    org_wp = "Homo sapiens"
-} else if (organism == "mouse") {
-    anno_db = "org.Mm.eg.db"
-    org_kegg = "mmu"
-    org_reactome = "mouse"
-    org_wp = "Mus musculus"
-} else {
-    msg <- paste0("Organism not implemented: ", organism)
-    stop(msg)
-}
-library(anno_db, character.only = TRUE)
 
 
 ############### Sanitize parameters and read input data
@@ -152,17 +121,6 @@ if (length(base::setdiff(allSampleAnno[[cond_col]], contrast[2:3])) > 0) {
 
 
 # Add sample col based on condition and replicate if sample col is not explicitly specified
-# and make samplesheet distinct (in case the 'merge replicates' functionality was used).
-if(nfcore) {
-  sample_col = "sample"
-  sampleAnno = sampleAnno %>%
-    select(-fastq_1, -fastq_2) %>%
-    distinct()
-  allSampleAnno = allSampleAnno %>%
-    select(-fastq_1, -fastq_2) %>%
-    distinct()
-}
-
 if (is.null(covariate_formula)) {
   covariate_formula = ""
 }
@@ -194,7 +152,7 @@ if (gene_id_type == "ENSEMBL") {
 }
 
 ensg_to_genesymbol = count_mat %>% select(gene_id, gene_name)
-ensg_to_desc = AnnotationDbi::select(get(anno_db), count_mat$gene_id %>% unique(), keytype = gene_id_type, columns = c("GENENAME")) %>%
+ensg_to_desc = AnnotationDbi::select(get("org.Hs.eg.db"), count_mat$gene_id %>% unique(), keytype = gene_id_type, columns = c("GENENAME")) %>%
   distinct(across(!!gene_id_type), .keep_all = TRUE)
 
 # if we do DESeq on sampleSubset we save also the full count mat for generating a full PCA plot
@@ -209,7 +167,6 @@ count_mat = count_mat %>%
   select(c(gene_id, sampleAnno[[sample_col]])) %>%
   column_to_rownames("gene_id") %>%
   round() # salmon does not necessarily contain integers
-
 
 
 save_plot <- function(filename, p, width=NULL, height=NULL) {
@@ -260,9 +217,6 @@ p <- ggplot(gene_count, aes(sample, genes, fill=group)) +
 
 save_plot(file.path(results_dir, paste0(prefix, "_number_of_detected_genes")), p, width=10, height=7)
 write_tsv(gene_count, file.path(results_dir, paste0(prefix, "_number_of_detected_genes.tsv")))
-
-## keep only genes where we have >= 10 reads in total
-# keep <- rowSums(counts(dds)) >= 10
 
 ## keep only genes where we have >= 10 reads per samplecondition in total
 keep <- rowSums(counts(collapseReplicates(dds, dds[[cond_col]]))) >= 10
@@ -429,6 +383,9 @@ p <- EnhancedVolcano(resIHW,
                 lab = resIHW$gene_name,
                 x = "log2FoldChange",
                 y = "padj",
+                drawConnectors = TRUE,
+                labSize=6,
+                max.overlaps=15,
                 pCutoff = fdr_cutoff,
                 FCcutoff = fc_cutoff,
                 subtitle = "",
