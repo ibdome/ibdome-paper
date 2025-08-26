@@ -1,6 +1,4 @@
 #!/bin/bash
-source ~/.bash_profile
-conda activate stamp
 
 ### Virchow2 model ###
 
@@ -18,4 +16,3 @@ echo "[-] Generating statistics..."
 stamp --config ./external_tools/STAMP/config_virchow2_class_deploy_all_inflamed.yaml statistics
 
 echo "[-] Done."
-conda deactivate

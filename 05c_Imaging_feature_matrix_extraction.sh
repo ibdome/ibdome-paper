@@ -1,6 +1,4 @@
 #!/bin/bash
-source ~/.bash_profile
-conda activate stamp
 
 ### 5fcv Berlin+Erlangen ###
 
@@ -12,5 +10,3 @@ echo "[-] 5FCV Done."
 echo "[-] Imaging feature matrix generation"
 python external_tools/marugoto/generate_img_features_classifier.py
 echo "[-] Done."
-
-conda deactivate
