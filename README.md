@@ -147,7 +147,8 @@ They must be executed in ascending numerical order, as outputs of one step are o
 Each script type is run differently:
 
 - **R Markdown (`.Rmd`)**
-  - Interactive: open in RStudio and click **Knit**
+    2 run possibilities: 
+  - Interactive: open in RStudio and click **Knit** or by
   - Command line:
     ```bash
     Rscript -e "rmarkdown::render('0X_markdown_file.Rmd')"
