@@ -22,7 +22,7 @@ box::use(
    stringr[str_replace],
    clusterProfiler[enrichGO, setReadable, ridgeplot],
    org.Hs.eg.db[org.Hs.eg.db],
-   cowplot[theme_cowplot, background_grid],
+   cowplot[theme_cowplot],
    tibble[column_to_rownames, rownames_to_column],
    tidyr[pivot_wider],
    ComplexHeatmap[Heatmap, HeatmapAnnotation, anno_empty, draw],
@@ -81,7 +81,7 @@ genelists <- list("CD colon" = CD_colon,
                   "UC colon" = UC_colon)
 
 ggvenn(genelists, fill_color=unname(COLORS$group_tissue), show_percentage = FALSE, text_size=7)
-ggsave(file.path(params$artifact_dir, "Figure3b.pdf"), width = 5, height = 6)
+ggsave(file.path(params$artifact_dir, "Figure3B.pdf"), width = 5, height = 6)
 ``` 
 
 
@@ -111,7 +111,7 @@ v1 <- ggvenn(genelists_up, fill_color=unname(COLORS$group_tissue), show_percenta
 v2 <- ggvenn(genelists_down, fill_color=unname(COLORS$group_tissue), show_percentage = FALSE, text_size=7)
 
 (v1 | v2)
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure3b.pdf"), width = 10, height = 6)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure4B.pdf"), width = 10, height = 6)
 ``` 
 
 ## Enrichment analysis of commonly up- and downregulated genes
@@ -185,7 +185,7 @@ mutate(poi_common_up, qscore = -log(p.adjust, base=10)) |>
   barplot(x="qscore") +
   theme_cowplot()
 
-ggsave(file.path(params$artifact_dir, "Figure3c.pdf"), height = 5, width = 6)
+ggsave(file.path(params$artifact_dir, "Figure3C.pdf"), height = 5, width = 6)
 ``` 
 
 ### Run ORA GO-BP of commonly downregulated genes
@@ -321,7 +321,7 @@ hm <- Heatmap(tpm_data_goi_scaled,
               ))
 
 # Save to file:
-pdf(file=file.path(params$artifact_dir, "ExtendedDataFigure3c.pdf"), width=20, height=10)
+pdf(file=file.path(params$artifact_dir, "SupplementaryFigure4C.pdf"), width=20, height=10)
 draw(hm,
      heatmap_legend_side = "bottom",
      annotation_legend_side = "bottom",
@@ -401,11 +401,12 @@ p_IL12 <- ggplot(tpm_goi_box, aes(x = group_tissue, y = log_tpm)) +
   geom_quasirandom(aes(color = group_tissue)) +
   facet_wrap(~ hgnc_symbol, ncol = 4) +
   theme_cowplot() +
-  background_grid() +
   theme(
     axis.text.x = element_text(angle = 45, hjust = 1),
     strip.text = element_text(size = 13, face = "italic"),
-    legend.title = element_text(face="bold")
+    legend.title = element_text(face="bold"),
+    legend.box.background = element_rect(color = "black", fill = NA),
+    legend.box.margin = margin(6, 6, 6, 6),
   ) +
   scale_color_manual(values = COLORS$group_tissue, name="group") +
   ylim(0, 3.3) +
@@ -419,10 +420,11 @@ p_IL12 <- ggplot(tpm_goi_box, aes(x = group_tissue, y = log_tpm)) +
     xmax = c("nonIBD_colon","nonIBD_colon", "nonIBD_ileum", "nonIBD_colon", "nonIBD_colon", # significant
              "nonIBD_colon", "nonIBD_ileum", "nonIBD_ileum", "nonIBD_colon", "nonIBD_colon", # non-significant
              "nonIBD_ileum", "nonIBD_colon", "nonIBD_colon", "nonIBD_colon", "nonIBD_ileum", "nonIBD_colon", "nonIBD_ileum", "nonIBD_colon", "nonIBD_colon", "nonIBD_ileum", "nonIBD_colon", "nonIBD_colon", "nonIBD_ileum", "nonIBD_colon"),
-    annotations = c(rep("padj < 0.05", 5), rep("ns", 19)),
+    annotations = c(rep("italic('Adj.P')~'< .05'", 5), rep("ns", 19)),
     y_position = c(3, 3, 2.5, 3, 2, # significant
                    2, 2.5, 2.5, 2, 3, 2.5, 2, 2, 3, 2.5, 3, 2.5, 2, 3, 2.5, 2, 3, 2.5, 2)  # non-significant
   ), 
+  parse= TRUE,
     aes(
       xmin = xmin, 
       xmax = xmax, 
@@ -439,7 +441,7 @@ p_IL12 <- ggplot(tpm_goi_box, aes(x = group_tissue, y = log_tpm)) +
                fill = "gray", 
                alpha = 0.3)  
 p_IL12
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure3d.pdf"), height = 5.5, width = 9)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure4D.pdf"), height = 5.5, width = 9)
 ``` 
 
 ## Plot MUCINS
@@ -467,8 +469,8 @@ annotations_data <- data.frame(
            "CD_ileum", "UC_colon", "CD_colon", "CD_ileum", "CD_colon", "CD_ileum", "CD_colon", "CD_ileum", "CD_colon", "UC_colon", "CD_colon", "UC_colon", "CD_colon", "UC_colon", "CD_colon", "UC_colon"),
   xmax = c(rep("nonIBD_colon", 4), rep("nonIBD_ileum", 4), # significant
            "nonIBD_ileum", "nonIBD_colon", "nonIBD_colon", "nonIBD_ileum", "nonIBD_colon", "nonIBD_ileum", "nonIBD_colon", "nonIBD_ileum" ,rep("nonIBD_colon",8)),
-  annotations = c(rep("padj < 0.05",8), rep("ns",16)),
-  y_position = c(4.5, rep(3.5,3), rep(4, 4), 4, 3.5, 4.5, 4, 4.5, 4, 4.5, 4, 4.5, 3.5,  4.5, 3.5,  4.5, 3.5,  4.5, 3.5)
+  annotations = c(rep("italic('Adj.P')~'< .05'",8), rep("ns",16)),
+  y_position = c(4.7, rep(3.2,3), rep(4, 4), 4, 3.2, 4.7, 4, 4.7, 4, 4.7, 4, 4.7, 3.2,  4.7, 3.2,  4.7, 3.2,  4.7, 3.2)
 ) %>%
   mutate(
     hgnc_symbol = factor(hgnc_symbol, levels = c("MUC2", "MUC6", "MUC16", "MUC17", "MUC4", "MUC5B", "MUC20", "MUCL3"))
@@ -479,14 +481,13 @@ p <- ggplot(tpm_goi_mucins, aes(x = group_tissue, y = log_tpm)) +
   geom_quasirandom(aes(color = group_tissue)) +
   facet_wrap(~ hgnc_symbol, ncol = 4) +
   theme_cowplot() +
-  background_grid() +
   theme(
     axis.text.x = element_text(angle = 45, hjust = 1),
     strip.text = element_text(size = 13, face = "italic"),
     legend.position = "none" # Temporarily remove the legend
   ) +
   scale_color_manual(values = COLORS$group_tissue) +
-  ylim(0, 4.8) +
+  ylim(0, 5.1) +
   labs(x = "", y = "log10(TPM+1)") +
   geom_signif(
     data = annotations_data,
@@ -497,6 +498,7 @@ p <- ggplot(tpm_goi_mucins, aes(x = group_tissue, y = log_tpm)) +
       y_position = y_position
     ),
     manual = TRUE,
+    parse = TRUE,
     inherit.aes = FALSE
   )+
    # Add boxplot
@@ -522,7 +524,9 @@ legend <- cowplot::get_legend(
     scale_color_manual(values = COLORS$group_tissue, name = "group") +
     theme_cowplot() +
     theme(legend.position = "right",
-          legend.title = element_text(face="bold"))
+          legend.title = element_text(face="bold"),
+          legend.box.background = element_rect(color = "black", fill = NA),
+          legend.box.margin = margin(6, 6, 6, 6),)
 )
 
 # Combine the main plot, row labels, and legend
@@ -530,7 +534,7 @@ p <- (p + row_labels + plot_layout(widths = c(1, 0.1))) |
   legend
 
 p
-ggsave(file.path(params$artifact_dir, "Figure3d.pdf"), height = 5.5, width = 14)
+ggsave(file.path(params$artifact_dir, "Figure3D.pdf"), height = 5.5, width = 14)
 ``` 
 
 ### Session info

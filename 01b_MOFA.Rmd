@@ -345,7 +345,7 @@ plot_data_overview(MOFAobject) +
   ) +
   labs(caption = paste("N = ", dim(samples_grouped_filtered)[1]))
 
-ggsave(file.path(params$artifact_dir, "Figure5a.pdf"), width = 6, height = 4)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure2A.pdf"), width = 6, height = 4)
 ``` 
 
 ### Define parameters
@@ -387,12 +387,11 @@ plot_factor_cor(MOFAobject)
 
 ```{r, fig.height=6, fig.width=4}
 plot_variance_explained(MOFAobject)
-ggsave(file.path(params$artifact_dir, "Figure5b.pdf"), width = 4, height = 6)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure2B.pdf"), width = 4, height = 6)
 ``` 
 
 ```{r, fig.height=3, fig.width=2}
 plot_variance_explained(MOFAobject, plot_total = T)[[2]]
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure5a.pdf"), width = 2, height = 3)
 ``` 
 
 ### Correlate factors with covariates
@@ -407,7 +406,7 @@ p_cor <- correlate_factors_with_covariates(MOFAobject,
 
 corrplot(p_cor, col = colorRampPalette(c("blue", "white", "red"))(10), tl.col="black")
 
-pdf(file.path(params$artifact_dir, "Figure5c.pdf"), width = 6, height = 2)
+pdf(file.path(params$artifact_dir, "SupplementaryFigure2C.pdf"), width = 6, height = 2)
 corrplot(p_cor, col = colorRampPalette(c("blue", "white", "red"))(10), tl.col="black")
 dev.off()
 ``` 
@@ -422,8 +421,6 @@ plot_factor(MOFAobject, factors = 1, color_by = "tissue",
   add_violin = TRUE, dodge = TRUE) +
   scale_fill_manual(values=COLORS$tissue) + 
   theme(legend.title = element_text(face = "bold"))
-
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure5b.pdf"), width = 5, height = 3)
 ```
 
 2. Factor 2 ~ inflammation 
@@ -432,8 +429,6 @@ ggsave(file.path(params$artifact_dir, "ExtendedDataFigure5b.pdf"), width = 5, he
 plot_factor(MOFAobject, factors = 2, color_by = "histo_score") +
   scale_fill_viridis(option="B") + 
   theme(legend.title = element_text(face = "bold"))
-
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure5c.pdf"), width = 2.5, height = 3)
 ```
 
 ```{r, fig.height=3, fig.width=4}
@@ -441,8 +436,6 @@ plot_factor(MOFAobject, factors = 2, color_by = "inflammation_status",
   add_violin = TRUE, dodge = TRUE) +
   scale_fill_manual(values=COLORS$inflammation_status) + 
   theme(legend.title = element_text(face = "bold"))
-
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure5d.pdf"), width = 4, height = 3)
 ```
 
 3. Factors 1-9 ~ disease
@@ -463,8 +456,6 @@ plot_factors(MOFAobject,
   scale_fill_manual(values=COLORS$disease) +
   theme(legend.title = element_text(face = "bold", size=12),
         legend.text = element_text(size=10))
-
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure5e.pdf"), width = 6, height = 4)
 ``` 
 
 
@@ -479,27 +470,27 @@ MOFAobject <- run_umap(MOFAobject)
 ```{r, fig.height=6, fig.width=10}
 p4 <- plot_dimred(MOFAobject,
             method="UMAP",
-            color_by="disease") +
-  scale_fill_manual(values=COLORS$disease) + 
-  theme(legend.title = element_text(face = "bold"))
+            color_by="disease",
+            dot_size=2.5) +
+  scale_fill_manual(values=COLORS$disease) 
  
 p2 <- plot_dimred(MOFAobject,
             method="UMAP",
-            color_by="inflammation_status") +
-  scale_fill_manual(values=COLORS$inflammation_status) + 
-  theme(legend.title = element_text(face = "bold"))
+            color_by="inflammation_status",
+            dot_size=2.5) +
+  scale_fill_manual(values=COLORS$inflammation_status) 
 
 p3 <- plot_dimred(MOFAobject,
             method="UMAP",
-            color_by="tissue") +
-  scale_fill_manual(values=COLORS$tissue_coarse)+ 
-  theme(legend.title = element_text(face = "bold"))
+            color_by="tissue",
+            dot_size=2.5) +
+  scale_fill_manual(values=COLORS$tissue_coarse)
  
 p1 <- plot_dimred(MOFAobject,
             method="UMAP",
-            color_by="histo_score") + 
-  scale_fill_viridis(option="B")+ 
-  theme(legend.title = element_text(face = "bold"))
+            color_by="histo_score",
+            dot_size=2.5) +
+  scale_fill_viridis(option="B")
 
 # Combine into 2x2 grid
 (p1 | p2) / (p3 | p4) + 
@@ -507,12 +498,14 @@ p1 <- plot_dimred(MOFAobject,
     theme = theme(plot.margin = margin(10, 10, 10, 10))
   ) & 
   theme(
-    axis.title.x = element_text(size = 10, margin = margin(t = 10)),
-    axis.title.y = element_text(size = 10, margin = margin(r = 10))
+    axis.title.x = element_text(size = 10, margin = margin(t = 10), face = "bold"),
+    axis.title.y = element_text(size = 10, margin = margin(r = 10), face = "bold"),
+    legend.title = element_text(face = "bold", size = 12),
+    legend.text = element_text(size = 11)
   ) & 
-  labs(x = "UMAP 1", y = "UMAP 2")
+  labs(x = "UMAP 1", y = "UMAP 2") 
 
-ggsave(file.path(params$artifact_dir, "Figure5d.pdf"), width = 10, height = 6)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure2D.pdf"), width = 10, height = 6)
 ``` 
 
 ### Session info

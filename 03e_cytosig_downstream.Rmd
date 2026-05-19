@@ -100,7 +100,7 @@ hm <- Heatmap(df_score_cyto_orig,
 )
 
 # Save to file:
-pdf(file=file.path(params$artifact_dir, "Figure3e.pdf"), width=17.5, height=2)
+pdf(file=file.path(params$artifact_dir, "Figure3E.pdf"), width=17.5, height=2)
 draw(hm)
 dev.off()
 

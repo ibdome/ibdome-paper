@@ -167,9 +167,10 @@ Each script type is run differently:
     ```
 
 ### Execution Order
-Run the scripts starting from `01_IBDome_overview.Rmd` and activate the correct Conda environment if needed.
+Run the scripts starting from `01a_IBDome_overview.Rmd` and activate the correct Conda environment if needed.
 ```bash
-Rscript -e "rmarkdown::render('01_IBDome_overview.Rmd')"
+Rscript -e "rmarkdown::render('01a_IBDome_overview.Rmd')"
+Rscript -e "rmarkdown::render('01b_MOFA.Rmd')"
 Rscript -e "rmarkdown::render('02_IPSS.Rmd')"
 Rscript -e "rmarkdown::render('03a_gene_signatures.Rmd')"
 
