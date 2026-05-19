@@ -17,7 +17,7 @@ box::use(
    dplyr[...],
    tibble[column_to_rownames, rownames_to_column],
    tidyr[pivot_wider, pivot_longer, drop_na],
-   cowplot[theme_cowplot, background_grid],
+   cowplot[theme_cowplot],
    ggbeeswarm[geom_quasirandom],
    ggpubr[stat_cor],
    ggplot2[...],
@@ -53,10 +53,22 @@ make_scatter = function(df, disease_filter, color_by, x, y, wjitter=NULL, hjitte
   p = df |> 
     filter(disease == !!disease_filter) |>
     ggplot(aes_string(x=x, y=y)) + geom_jitter(aes_string(color=color_by), width=wjitter, height=hjitter) + 
-    theme_cowplot() + background_grid() + stat_cor() + ggtitle(disease_filter) + 
-    geom_smooth(method="lm", fullrange=TRUE, se=FALSE, color="darkgray") + 
-    scale_color_manual(values=COLORS$tissue)
-  p
+    theme_cowplot() + stat_cor(na.rm = TRUE, p.accuracy = .01) + ggtitle(disease_filter) + 
+    geom_smooth(method="lm", fullrange=TRUE, se=FALSE, color="darkgray", show.legend = FALSE) + 
+    scale_color_manual(values=COLORS$tissue) +
+    theme(
+      # Axis labels in bold
+      axis.title.x = element_text(face = "bold"),
+      axis.title.y = element_text(face = "bold"),
+      # Legend with box
+      legend.position = "bottom",
+      legend.title = element_text(face = "bold"),
+      legend.text = element_text(size = 12),
+      legend.box.background = element_rect(color = "black", fill = NA),
+      # Space between legend text and box
+      legend.box.margin = margin(8, 12, 8, 12),
+    )
+  return(p)
 }
 ```
 
@@ -209,7 +221,7 @@ draw(hm_patients,
      annotation_legend_side = "bottom",
      merge_legend=TRUE)
 
-pdf(file=file.path(params$artifact_dir, "ExtendedDataFigure1a.pdf"), width=20, height=4)
+pdf(file=file.path(params$artifact_dir, "SupplementaryFigure1A.pdf"), width=20, height=4)
 draw(hm_patients,
      annotation_legend_list = list(lgd_sig),
      heatmap_legend_side = "bottom",
@@ -244,17 +256,19 @@ all_sample_counts |>
   geom_bar(stat='identity') + 
   theme_cowplot() + 
   xlab("")+
+  ylab("# patients") +
   scale_fill_manual(values=COLORS$disease, na.translate=FALSE) + 
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
   geom_text(
     aes(label=after_stat(y), group=sample_type),
     stat= 'summary', fun=sum, vjust=-0.1)
 
-ggsave(file.path(params$artifact_dir, "Figure1b.pdf"), width = 6, height = 5)
+ggsave(file.path(params$artifact_dir, "Figure1B.pdf"), width = 6, height = 5)
 ```
 
 ### Number of total samples
-```{r, fig.width=6, fig.height=4}
+```{r, fig.width=6, fig.height=5}
 number_samples_total = tbl(DB, "samples_subjects_tissues") |>
    select(subject_id, disease, sample_type) |> group_by(sample_type, disease) |> count() |> collect() |>
    filter(sample_type != "16S") ## exclude for now as we only have 27 at the moment
@@ -272,14 +286,15 @@ number_samples_total |>
   geom_bar(stat='identity') + 
   theme_cowplot() + 
   xlab("")+
+  ylab("# samples") +
   scale_fill_manual(values=COLORS$disease, na.translate=FALSE) + 
   scale_y_continuous(expand=expansion(mult =c(0,0.1))) +
   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
-    geom_text(
+  geom_text(
     aes(label=after_stat(y), group=sample_type),
     stat= 'summary', fun=sum, vjust=-0.1)
 
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1b.pdf"), width = 6, height = 4)
+ggsave(file.path(params$artifact_dir, "Figure1A.pdf"), width = 6, height = 5)
 ``` 
 
 ### Correlation between histopathology and stool score
@@ -288,13 +303,12 @@ stool_vs_histo = histo_scores |> inner_join(stool_scores) |> inner_join(subject_
   group_by(subject_id, date, tissue_coarse, disease) |> summarise_all(\(x) median(x, na.rm = TRUE)) |> ungroup()
 
 p2 <- make_scatter(stool_vs_histo, "Ulcerative colitis", "tissue_coarse", x="normalized_riley_score", y="stool_score", wjitter=0.02, hjitter=0.05) +
-  theme(legend.position="none") + ylab("") # hide first legend
+  theme(legend.position="none") + ylab("")  # hide first legend
 p1 <- make_scatter(stool_vs_histo, "Crohn's disease", "tissue_coarse", x="normalized_naini_cortina_score", y="stool_score", wjitter=0.02, hjitter=0.05) +
-   theme(legend.position="bottom", legend.title = element_text(face="bold")) +
-  labs(color="tissue")
+  labs(color="tissue") 
 
 p1+p2
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1c.pdf"), width = 8, height = 4.5)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure1E.pdf"), width = 8, height = 4.5)
 ``` 
 
 ### Correlation between histopathology and clinical scores
@@ -313,13 +327,12 @@ clinical_vs_histo = clinical_scores |>
 clinical_vs_histo  = clinical_vs_histo |> filter(time_difference < 180)
 
 p2 <- make_scatter(clinical_vs_histo, "Ulcerative colitis", "tissue_coarse", x="pms_score_sum", y="normalized_riley_score", wjitter=0.2, hjitter=0.05) +
-  theme(legend.position="none")
-p1 <- make_scatter(clinical_vs_histo, "Crohn's disease", "tissue_coarse", x="hbi_score_sum", y="normalized_naini_cortina_score", wjitter=0.2, hjitter=0.05) +
-  theme(legend.position="bottom", legend.title = element_text(face="bold")) +
+  theme(legend.position="none")  # hide first legend
+p1 <- make_scatter(clinical_vs_histo, "Crohn's disease", "tissue_coarse", x="hbi_score_sum", y="normalized_naini_cortina_score", wjitter=0.2, hjitter=0.05) + 
   labs(color="tissue")
 
 p1+ p2
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1d.pdf"), width = 8, height = 4.5)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure1G.pdf"), width = 8, height = 4.5)
 ``` 
 
 ### Correlation between endoscopy and histopathology scores
@@ -327,129 +340,17 @@ ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1d.pdf"), width = 8, he
 endo_vs_histo = histo_scores |> inner_join(endo_scores) |> inner_join(subject_timepoints |> select(subject_id, disease), by="subject_id") |> 
   group_by(subject_id, date, tissue_coarse, disease) |> summarise_all(\(x) median(x, na.rm = TRUE)) |> ungroup()
 
-p2 <- make_scatter(endo_vs_histo, "Ulcerative colitis", "tissue_coarse", x="UCEIS", y="normalized_riley_score", wjitter=0.02, hjitter=0.05) +
-  theme(legend.position="none") # hide first legend
+p2 <- make_scatter(endo_vs_histo, "Ulcerative colitis", "tissue_coarse", x="UCEIS", y="normalized_riley_score", wjitter=0.02, hjitter=0.05) + 
+  theme(legend.position="none")  # hide first legend
 p1 <- make_scatter(endo_vs_histo, "Crohn's disease", "tissue_coarse", x="SES_CD", y="normalized_naini_cortina_score",  wjitter=0.02, hjitter=0.05) +
-  theme(legend.position = "bottom", legend.title = element_text(face="bold")) +
   labs(color="tissue")
 
 p1+ p2 
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1e.pdf"), width = 8, height = 4.5)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure1F.pdf"), width = 8, height = 4.5)
 ```
 
 
 ## Whole exome sequencing
-
-### Get mutations from known risk loki from database
-
-```{r}
-mut_table <- tbl(DB, "samples_subjects_tissues") |> filter(batch != "0") |> select(sample_id, subject_id) |> ### batch 0 is not yet in the database
-  left_join(tbl(DB, "data_wes")) |>
-  left_join(tbl(DB, "genes") |> select(c("ensg", "hgnc_symbol")), join_by("gene_id" == "ensg")) |>
-  collect()
-```
-
-### Create mutation matrix with mutated yes=1 and no=0
-
-```{r}
-# Convert to wide binary matrix
-mutation_matrix <- mut_table |>
-  filter(! is.na(hgnc_symbol)) |>
-  select(subject_id, hgnc_symbol) |>
-  distinct() |>
-  mutate(mutated = TRUE) |>
-  pivot_wider(names_from = hgnc_symbol, values_from = mutated, values_fill = FALSE)
-
-mutation_long <- mutation_matrix |>
-  pivot_longer(-subject_id, names_to="hgnc_symbol", values_to = "mutated")
-``` 
-
-### Get expressiond data
-
-Get RNA-seq data:
-```{r}
-rnaseq_data = tbl(DB, "samples_subjects_tissues") |>
-  inner_join(tbl(DB, "data_rnaseq"), by="sample_id") |> 
-  inner_join(tbl(DB, "genes"), by=c("gene_id"="ensg")) |>
-  select(subject_id, sample_id, tissue_coarse, disease, date, gene_id, hgnc_symbol, tpm, raw_counts) |> collect() 
-``` 
-
-
-### Merge both data types
-```{r}
-rna_df <- rnaseq_data |>
-  filter(hgnc_symbol %in% colnames(mutation_matrix)) |>
-  select(sample_id, subject_id, disease, hgnc_symbol, tpm) |>
-  filter(! hgnc_symbol %in% c("MIR3909", "MIR6069", "MIR6727", "RNU6-1082P")) ### remove genes that are not expressed
-  
-plot_df <- rna_df |>
-  left_join(mutation_long) |>
-  filter(! is.na(mutated)) ### remove those samples for which we don't have mutation data
-``` 
-
-Add group information:
-```{r}
-plot_df <- plot_df |>
-  mutate(disease = case_when(disease == "Crohn's disease" ~ "CD",
-                             disease == "Ulcerative colitis" ~ "UC",
-                             TRUE ~ disease)) |>
-  mutate(group = paste(disease, ifelse(mutated, "mutated", "not mutated"), sep = " - "))
-
-plot_df_filtered <- plot_df |>
-  filter(disease %in% c("CD", "UC", "non-IBD"))
-table(plot_df_filtered$group)
-``` 
-
-### Statistical differences
-
-### Adjust p-values
-
-```{r}
-pval_table <- plot_df_filtered |>
-  filter(!(disease == "non-IBD" & hgnc_symbol %in% c("F5", "GRID2IP"))) |> ### not enough observations for these genes in non-IBD
-  group_by(hgnc_symbol, disease) |>
-  summarise(
-    test = list(wilcox.test(tpm ~mutated)),
-    .groups = "drop"
-  ) |>
-    mutate(
-    p = map_dbl(test, ~ .x$p.value),
-    p.adj = p.adjust(p, method = "BH"), 
-    group1 = "not mutated",
-    group2 = "mutated"
-  )
-
-pval_table <- pval_table |>
-  mutate(group = paste(disease, "- mutated"))
-``` 
-
-### Plot mutations with significant differences in gene expression in at least one comparison
-
-```{r, fig.height=5, fig.width=15}
-pval_table_sig <- pval_table |>
-  filter(p.adj < 0.05)
-
-ggplot(plot_df_filtered |> filter(hgnc_symbol %in% pval_table_sig$hgnc_symbol), aes(x = group, y = tpm, fill = mutated)) +
-  geom_violin(trim = FALSE, alpha = 0.5, color = NA) +
-  geom_boxplot(width = 0.1, outlier.shape = NA) +
-  geom_jitter(width = 0.1, alpha = 0.4, color = "black") +
-  facet_wrap(~ hgnc_symbol, scales = "free_y", ncol=3) +
-  scale_fill_manual(values = c("FALSE" = "gray80", "TRUE" = "tomato")) +
-  labs(x = "", y = "expression [TPM]") +
-  theme_cowplot()+
-  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0.5)) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
-  geom_text(data = pval_table_sig,
-            aes(x = 1.5, y = c(9.6, 158, 19.5), label = sprintf("adj p = %.2g", p.adj)), ### as it is always the same comparison, that is significant, we can set fixed positions!
-            inherit.aes = FALSE,
-            size = 4) +
-   geom_segment(data = pval_table_sig, ### add a line for the statistical pairs
-               aes(x = 1, xend = 2, y = c(9, 150, 18.5), yend = c(9, 150, 18.5)),
-               inherit.aes = FALSE,
-               linewidth = 0.5)
-
-ggsave(file.path(params$artifact_dir, "Figure1d.pdf"), width = 15, height = 5)
-``` 
 
 ### NOD2 mutation
 
@@ -483,6 +384,13 @@ coding_vars_NOD2_filtered <- coding_vars_NOD2 |>
   unique()
 
 dim(table(coding_vars_NOD2_filtered$subject_id))
+
+# Get number of subjects per diseae
+n_patients = coding_vars_NOD2_filtered |>
+  select(subject_id, disease) |>
+  distinct()
+
+table(n_patients$disease)
 ``` 
 
 ```{r}
@@ -605,10 +513,30 @@ lolliplot(mutation_gr,  # GRanges object with mutations
           ylab="NOD2",
           rescale = TRUE)
 
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1f.pdf"), width = 15, height = 5)
+pdf(file.path(params$artifact_dir, "Figure1D.pdf"), width = 15, height = 5)
+lolliplot(mutation_gr,  # GRanges object with mutations
+          features,
+          type = "pie",
+          legend = legends,
+          legendPosition="right",
+          ylab="NOD2",
+          rescale = TRUE)
+
+dev.off()
+#ggsave(file.path(params$artifact_dir, "Figure1D.pdf"), width = 15, height = 5)
 ``` 
 
 ## DE analysis comparing IBD inflamed vs non-IBD samples
+
+### Get expression data
+
+Get RNA-seq data:
+```{r}
+rnaseq_data = tbl(DB, "samples_subjects_tissues") |>
+  inner_join(tbl(DB, "data_rnaseq"), by="sample_id") |> 
+  inner_join(tbl(DB, "genes"), by=c("gene_id"="ensg")) |>
+  select(subject_id, sample_id, tissue_coarse, disease, date, gene_id, hgnc_symbol, tpm, raw_counts) |> collect() 
+``` 
 
 Retrieve counts and metadata from the database:
 ```{r}
@@ -701,7 +629,7 @@ summary(resIHW)
 
 Write results to file for Extended Data Table 1:
 ```{r}
-write_tsv(resIHW, file=file.path(params$artifact_dir, "ExtendedDataTable1.tsv"))
+write_tsv(resIHW, file=file.path(params$artifact_dir, "SupplementaryTable1.tsv"))
 ``` 
 
 ### Filter for significantly regulated genes
@@ -808,6 +736,7 @@ la = rowAnnotation(immune_group = immune_IBDome$group,
 )
 ```
 
+
 ```{r, fig.height=12, fig.width=20}
 # Define order for plotting
 rnaseq_metadata$group <- factor(rnaseq_metadata$group, levels = c('IBD_inflamed', 'IBD_non_inflamed', 'non-IBD'))
@@ -838,7 +767,7 @@ draw(hm_IBDome,
      annotation_legend_side = "bottom",
      merge_legend=TRUE)
 
-pdf(file=file.path(params$artifact_dir, "Figure1e.pdf"), width=20, height=12)
+pdf(file=file.path(params$artifact_dir, "Figure1E.pdf"), width=20, height=12)
 draw(hm_IBDome,
      heatmap_legend_side = "bottom",
      annotation_legend_side = "bottom",
@@ -882,7 +811,15 @@ DCdata_long_inflammation <- ti_racle |>
   select(- c('Other', 'Dendritic.cells', 'Monocytes')) |>
   pivot_longer(cols=!Sample, names_to='celltype', values_to='fraction')|>
   dplyr::rename("sample_id" = "Sample") |>
-  left_join(rnaseq_metadata |> select('sample_id', 'group', 'tissue_coarse'))
+  left_join(rnaseq_metadata |> select('sample_id', 'group', 'disease', 'tissue_coarse'))
+``` 
+
+Get sample numbers:
+```{r}
+DCdata_long_inflammation |> 
+  group_by(disease, tissue_coarse, group) |>  
+  summarize(n_samples = n_distinct(sample_id)) |> 
+  arrange(disease, tissue_coarse, group)
 ``` 
 
 ```{r, fig.height=6, fig.width=19}
@@ -895,17 +832,19 @@ DC_filtered <- DCdata_long_inflammation |>
 ggplot(DC_filtered, aes(x = group, y = fraction, fill = group)) +
   geom_boxplot() +
   facet_grid(tissue_coarse ~ celltype) +
-  theme_cowplot() + background_grid() +
+  theme_cowplot() +
   xlab("")+
   ylab("cell fraction")+
   theme(
     axis.text = element_text(size = 16),
-    axis.title = element_text(size = 16),
+    axis.title = element_text(size = 16, face="bold"),
     legend.text = element_text(size = 16),
     legend.title = element_blank(),
     axis.text.x = element_blank(),
     strip.text = element_text(size = 16),  # Adjust facet label text size
-    legend.position = "bottom"
+    legend.position = "bottom",
+    legend.box.background = element_rect(color = "black", fill = NA), # add legend box
+    legend.box.margin = margin(8, 12, 8, 12) # Space between legend text and box
   ) +
   scale_fill_manual(values = COLORS$group) +  
   stat_compare_means(
@@ -918,7 +857,7 @@ ggplot(DC_filtered, aes(x = group, y = fraction, fill = group)) +
    ) +
   scale_y_continuous(limits = c(0,0.55))
 
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure1g.pdf"), width = 19, height = 6)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure1G.pdf"), width = 19, height = 6)
 ``` 
 
 ### Session info

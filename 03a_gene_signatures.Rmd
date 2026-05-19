@@ -20,7 +20,7 @@ box::use(
    SummarizedExperiment[SummarizedExperiment, colData, assay, rowData, `rowData<-`],
    DESeq2[vst, plotPCA, DESeqDataSet, estimateSizeFactors],
    ggplot2[...],
-   cowplot[theme_cowplot, plot_grid, background_grid],
+   cowplot[theme_cowplot, plot_grid],
    readr[write_csv, write_tsv]
 )
 ``` 
@@ -115,7 +115,7 @@ pca_df = pca_res |> as_tibble() |> select(name, PC1, PC2) |>
 plots = lapply(covariates, function(x) {
     p = ggplot(pca_df, aes_string(x="PC1", y="PC2", color=x)) + 
       geom_point(size=2) + 
-      theme_bw() +
+      theme_cowplot() +
       xlab(sprintf("PC1 (%s%% variance)", pct_var[1])) + 
       ylab(sprintf("PC2 (%s%% variance)", pct_var[2])) +
       theme(legend.position="right")
@@ -166,7 +166,7 @@ plots <- lapply(plots, function(p) {
 })
 
 cowplot::plot_grid(plotlist = plots, ncol=3)
-ggsave(file.path(params$artifact_dir, "Figure3a.pdf"), width = 15, height = 3)
+ggsave(file.path(params$artifact_dir, "Figure3A.pdf"), width = 15, height = 3)
 ``` 
 
 ## DE analysis
@@ -187,6 +187,11 @@ rnaseq_sample_meta = rnaseq_sample_meta |>
     mutate(group_tissue = paste(group_fine, tissue_coarse, sep = "_")) |>
     mutate(age = as.numeric(format(as.Date(date), "%Y"))- birth_year) |>
     mutate(age_scaled = scale(age)[,1])
+``` 
+
+Print sample numbers:
+```{r}
+table(rnaseq_sample_meta$group_tissue)
 ``` 
 
 ### Export tables to run DESeq2 with nextflow pipeline

@@ -29,11 +29,12 @@ box::use(
    UpSetR[upset],
    GSVA[gsva, gsvaParam],
    ggbeeswarm[geom_quasirandom],
-   ggpubr[stat_compare_means],
    reshape2[melt],
    Hmisc[rcorr],
    ComplexHeatmap[Heatmap],
-   readr[write_tsv]
+   readr[write_tsv],
+   rstatix[wilcox_test, add_xy_position],
+   ggprism[add_pvalue]
 )
 
 options(warn=-1)
@@ -103,10 +104,10 @@ pca_plots = lapply(covariates, function(color_var) {
     theme_cowplot() +
     theme(
       legend.position = "right",               
-      axis.title = element_text(size = 14),     # Increase axis title size
-      axis.text = element_text(size = 12),      # Increase axis text size
-      legend.text = element_text(size = 12),    # Increase legend text size
-      legend.title = element_text(size = 14)    # Increase legend title size
+      axis.title = element_text(size = 18),     # Increase axis title size
+      axis.text = element_text(size = 16),      # Increase axis text size
+      legend.text = element_text(size = 16),    # Increase legend text size
+      legend.title = element_text(size = 18, face="bold")    # Increase legend title size
     ) +
     scale_color_manual(values = COLORS[[color_var]]) 
 })
@@ -114,7 +115,7 @@ pca_plots = lapply(covariates, function(color_var) {
 # Arrange plots in a column:
 wrap_plots(pca_plots, ncol=1)
 
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure2b.pdf"), width = 7, height =15)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure3B.pdf"), width = 7, height =15)
 ```
 
 ## Differential abundance analysis with OlinkAnalyze
@@ -143,6 +144,14 @@ npx_data_IBDinf_noninf = npx_data |>
   filter(Assay %in% complete_cases)
 
 npx_data_IBDinf_noninf$group = as.factor(npx_data_IBDinf_noninf$group)
+``` 
+
+Get sample numbers:
+```{r}
+n_patients_IBD = npx_data_IBDinf_noninf |>
+  dplyr::select(SampleID, disease, inflammation_status) |>
+  distinct()
+table(n_patients_IBD$inflammation_status)
 ``` 
 
 Welch t-test
@@ -177,6 +186,8 @@ v1 <- EnhancedVolcano(t_res_IBDinf_noninf,
     ylim = c(0, 10),
     xlab = bquote(~log[2] ~ "fold change"),
     ylab = bquote(~-log[10] ~ italic((FDR))),
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE,
     legendPosition = 'right')  +
   theme(legend.position = "none") 
 ``` 
@@ -191,6 +202,14 @@ npx_data_CD = npx_data |>
   filter(Assay %in% complete_cases)
 
 npx_data_CD$group_disease = as.factor(npx_data_CD$group_disease)
+``` 
+
+Get sample numbers:
+```{r}
+n_patients_CD = npx_data_CD |>
+  dplyr::select(SampleID, disease, inflammation_status) |>
+  distinct()
+table(n_patients_CD$inflammation_status)
 ``` 
 
 Welch t-test
@@ -220,7 +239,11 @@ v3 <- EnhancedVolcano(t_res,
     ylim = c(0, 5),
     xlab = bquote(~log[2] ~ "fold change"),
     ylab = bquote(~-log[10] ~ italic((FDR))),
-    legendPosition = 'right')
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE,
+    legendPosition = 'right') +
+  theme(legend.box.background = element_rect(color = "black", fill = NA),
+      legend.box.margin = margin(4, 8, 4, 8))
 ``` 
 
 ### UC inflamed vs. non-inflamed
@@ -232,6 +255,14 @@ npx_data_UC = npx_data |>
   filter(Assay %in% complete_cases)
 
 npx_data_UC$group_disease = as.factor(npx_data_UC$group_disease)
+``` 
+
+Get sample numbers:
+```{r}
+n_patients_UC = npx_data_UC |>
+  dplyr::select(SampleID, disease, inflammation_status) |>
+  distinct()
+table(n_patients_UC$inflammation_status)
 ``` 
 
 Welch t-test
@@ -261,6 +292,8 @@ v2 <- EnhancedVolcano(t_res,
     ylim = c(0, 5),
     xlab = bquote(~log[2] ~ "fold change"),
     ylab = bquote(~-log[10] ~ italic((FDR))),
+    gridlines.major = FALSE,
+    gridlines.minor = FALSE,
     legendPosition = 'right')  +
   theme(legend.position = "none") 
 ``` 
@@ -270,7 +303,7 @@ Put plots together:
 # Arrange plots in a column:
 (v1 | v2 | v3)
 
-ggsave(file.path(params$artifact_dir, "Figure2a.pdf"), width = 16, height = 5)
+ggsave(file.path(params$artifact_dir, "Figure2A.pdf"), width = 16, height = 5)
 ``` 
 
 
@@ -374,7 +407,7 @@ Heatmap(df_exp, cluster_rows = FALSE, cluster_columns = FALSE,
   column_names_gp = gpar(fontsize = 16)  # Increase column label font size
 )
 
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure2e.pdf"), width = 7, height = 23)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure3E.pdf"), width = 7, height = 23)
 ```
 
 
@@ -386,11 +419,11 @@ IPSS = list("IBD-IPSS" = olink_IBD_IPSS,
             "UC-IPSS" = olink_UC_IPSS)
 ``` 
 
-Save as supplementary table 1:
+Save as supplementary table 7:
 ```{r}
-write.table(sort(olink_IBD_IPSS, decreasing=FALSE), file=file.path(params$artifact_dir, "ExtendedDataTable2_IBD_IPSS.tsv"), sep="\t", row.names = FALSE, col.names = FALSE, quote=FALSE)
-write.table(sort(olink_CD_IPSS, decreasing=FALSE), file=file.path(params$artifact_dir, "ExtendedDataTable2_CD_IPSS.tsv"), sep="\t", row.names = FALSE, col.names = FALSE, quote=FALSE)
-write.table(sort(olink_UC_IPSS, decreasing=FALSE), file=file.path(params$artifact_dir, "ExtendedDataTable2_UC_IPSS.tsv"), sep="\t", row.names = FALSE, col.names = FALSE, quote=FALSE)
+write.table(sort(olink_IBD_IPSS, decreasing=FALSE), file=file.path(params$artifact_dir, "SupplementaryTable7_IBD_IPSS.tsv"), sep="\t", row.names = FALSE, col.names = FALSE, quote=FALSE)
+write.table(sort(olink_CD_IPSS, decreasing=FALSE), file=file.path(params$artifact_dir, "SupplementaryTable7_CD_IPSS.tsv"), sep="\t", row.names = FALSE, col.names = FALSE, quote=FALSE)
+write.table(sort(olink_UC_IPSS, decreasing=FALSE), file=file.path(params$artifact_dir, "SupplementaryTable7_UC_IPSS.tsv"), sep="\t", row.names = FALSE, col.names = FALSE, quote=FALSE)
 ``` 
 
 ### Check overlap of the different scores
@@ -400,7 +433,7 @@ ggVennDiagram(IPSS[c("IBD-IPSS", "CD-IPSS", "UC-IPSS")], set_size=7, label_size=
   theme(legend.title = element_text(size=16), legend.text= element_text(size=14)) +
   scale_x_continuous(expand = expansion(mult = .1))
 
-ggsave(file.path(params$artifact_dir, "Figure2b.pdf"), width = 7, height = 6)
+ggsave(file.path(params$artifact_dir, "Figure2B.pdf"), width = 7, height = 6)
 ``` 
 
 ### Check overlap with the cirMIS scores
@@ -480,7 +513,7 @@ upset(
    text.scale = c(2, 2, 1.5, 1.5, 1.5, 2)  # Adjust text sizes (scaling factors)
 )
 
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure2c.pdf"), width = 5, height = 5)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure3C.pdf"), width = 5, height = 5)
 ```
 
 
@@ -512,9 +545,9 @@ gsva_long_prot <- gsva_results_prot |>
   mutate(date=as.Date(date))
 ```
 
-Write to Extended Data Table 3:
+Write to Supplementary Table 8:
 ```{r}
-write_tsv(gsva_long_prot |> dplyr::select(sample_id, subject_id, date, IBD.IPSS, CD.IPSS, UC.IPSS), file=file.path(params$artifact_dir, "ExtendedDataTable3_IPSSscores.tsv"))
+write_tsv(gsva_long_prot |> dplyr::select(sample_id, subject_id, date, IBD.IPSS, CD.IPSS, UC.IPSS), file=file.path(params$artifact_dir, "SupplementaryTable8_IPSSscores.tsv"))
 ``` 
 
 ## Correlation with other parameters
@@ -779,23 +812,49 @@ gsva_long = gsva_long |>
   mutate(inflammation = pmax(normalized_naini_cortina_score, normalized_riley_score, na.rm = TRUE))
 ``` 
 
-Write to Extended Data Table 4:
+Write to Supplementary Table 9:
 ```{r}
-write_tsv(gsva_long |> dplyr::select(sample_id, subject_id, date, tissue, sampling_procedure, bMIS_IBD, bMIS_CD, bMIS_UC), file=file.path(params$artifact_dir, "ExtendedDataTable4_bMISscores.tsv"))
+write_tsv(gsva_long |> dplyr::select(sample_id, subject_id, date, tissue, sampling_procedure, bMIS_IBD, bMIS_CD, bMIS_UC), file=file.path(params$artifact_dir, "SupplementaryTable9_bMISscores.tsv"))
 ``` 
 
 ### Plot bMIS-IBD scores with inflammation
 
-```{r, fig.width=6.5, fig.height=5}
+```{r, fig.width=7, fig.height=5}
+### Precompute statistics and change p-value style for plotting:
+comps <- list(
+  c("IBD_inflamed", "IBD_non_inflamed"),
+  c("non-IBD", "IBD_non_inflamed"),
+  c("IBD_inflamed", "non-IBD")
+)
+
+stat.test <- gsva_long |>
+  filter(!is.na(group)) |>
+  wilcox_test(bMIS_IBD ~ group, comparisons = comps, paired = FALSE) |>
+  add_xy_position(x = "group") |>
+  mutate(p_chr = formatC(p, format = "f", digits = 2), # numeric -> character with 2 decimals
+         p_trim = ifelse(substr(p_chr, 1, 2) == "0.", substr(p_chr, 2, nchar(p_chr)), p_chr), # drop leading zero if present
+         p_fmt = ifelse(p < .01, "< .01", p_trim),
+         label = ifelse(p < .01, "italic(P) ~'<.01'", paste0("italic(P) ~ '=' ~ '", p_trim, "'"))
+)
+
 ggplot(gsva_long |> filter(! is.na(group)), aes(x=group, y=bMIS_IBD))+
   geom_boxplot()+
   geom_quasirandom(aes(color=inflammation), size=2) + 
   scale_color_viridis_c()+
   theme_cowplot() +
+  theme(axis.text = element_text(size=14),
+        legend.title = element_text(size=14, face="bold")) +
   xlab("") +
-  stat_compare_means(method="wilcox.test", paired = FALSE, comparisons = list(c("IBD_inflamed", "IBD_non_inflamed"),c("non-IBD", "IBD_non_inflamed"),c("IBD_inflamed", "non-IBD")))
+  add_pvalue(
+    stat.test,
+    label = "label",
+    parse = TRUE, 
+    tip.length = 0,
+    step.increase = 0.05, # adjust spacing
+    label.size=4.5
+)
 
-ggsave(file.path(params$artifact_dir, "ExtendedDataFigure2a.pdf"), width = 6.5, height = 5)
+ggsave(file.path(params$artifact_dir, "SupplementaryFigure3A.pdf"), width = 7, height = 5)
 ```
 
 Combine with protein data:
@@ -891,7 +950,7 @@ corr_plot_cd = plot_corr_matrix(cor_cd, ordered_cd_names)
 
 # Combine plots with space
 corr_plot_uc + corr_plot_cd + plot_layout(guides = "collect") & theme(plot.margin = margin(10, 20, 10, 20))
-ggsave(file.path(params$artifact_dir, "Figure2d.pdf"), width = 6.5, height = 5)
+ggsave(file.path(params$artifact_dir, "Figure2D.pdf"), width = 12, height = 6)
 ```
 
 ### Session info
