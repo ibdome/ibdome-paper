@@ -3,7 +3,7 @@
 # IBDome paper
 
 
-Source code for the analyses accompanying the IBDome paper. 
+Source code for the analyses accompanying the [IBDome paper](https://doi.org/10.1053/j.gastro.2026.05.023). 
 
 ## Environment setup and database download
 
@@ -218,6 +218,6 @@ Please use the [issue tracker][issue-tracker].
 
 # Citation
 
-> Plattner, C., Sturm, G., Kühl, A.A., Atreya, R., Carollo, S., ... & Becker, C., Siegmund, B., Trajanoski, Z. (2025). IBDome: An integrated molecular, histopathological, and clinical atlas of inflammatory bowel diseases. bioRxiv. [doi:10.1101/2025.03.26.645544](https://doi.org/10.1101/2025.03.26.645544 ) 
+> Plattner, C., Sturm, G., Kühl, A.A., Atreya, R., Carollo, S., ... & Becker, C., Siegmund, B., Trajanoski, Z. IBDome: An integrated molecular, histopathological, and clinical atlas of inflammatory bowel diseases. Gastroenterology, 2026, [doi:10.1053/j.gastro.2026.05.023](https://doi.org/10.1053/j.gastro.2026.05.023) 
 
 [issue-tracker]: https://github.com/ibdome/ibdome-paper/issues
